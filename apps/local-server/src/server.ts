@@ -79,6 +79,46 @@ export function createLocalServer(options: LocalServerOptions) {
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', `http://${host}`);
+      if (req.method === 'GET' && url.pathname.startsWith('/watch/')) {
+        const code = url.pathname.slice('/watch/'.length);
+        const suppliedAccess = url.searchParams.get('access') ?? '';
+        await store.read((db) => {
+          const record = findRoom(db, code);
+          if (hashSecret(suppliedAccess) !== record.accessHash) {
+            throw new HttpError(403, 'room_access_denied', 'Invalid watch access token.');
+          }
+        });
+        res.writeHead(200, {
+          'content-type': 'text/html; charset=utf-8',
+          'cache-control': 'private, no-store',
+          'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
+          'x-frame-options': 'DENY',
+        });
+        res.end(watchPage(code));
+        return;
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/watch-data/')) {
+        const code = url.pathname.slice('/watch-data/'.length);
+        const suppliedAccess = url.searchParams.get('access') ?? '';
+        const snapshot = await store.read((db) => {
+          const record = findRoom(db, code);
+          if (hashSecret(suppliedAccess) !== record.accessHash) {
+            throw new HttpError(403, 'room_access_denied', 'Invalid watch access token.');
+          }
+          return {
+            room: {
+              code: record.room.code,
+              topic: record.room.topic,
+              status: record.room.status,
+              participants: record.room.participants.map(({ name, role, client }) => ({ name, role, client })),
+            },
+            messages: record.messages.map(({ name, role, client, text, time }) => ({ name, role, client, text, time })),
+            board: record.board,
+          };
+        });
+        send(res, 200, snapshot);
+        return;
+      }
       if (req.method === 'GET' && url.pathname.startsWith('/attachments/')) {
         const file = basename(url.pathname);
         const code = file.slice(0, 11);
@@ -141,6 +181,29 @@ export function createLocalServer(options: LocalServerOptions) {
     },
     async close(): Promise<void> { await new Promise<void>((resolve, reject) => server.close((e) => e ? reject(e) : resolve())); },
   };
+}
+
+function watchPage(code: string): string {
+  const safeCode = JSON.stringify(code).replace(/</g, '\\u003c');
+  return `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Room ${code}</title><style>
+body{font:16px system-ui;background:#111827;color:#f9fafb;max-width:850px;margin:auto;padding:24px}
+h1{font-size:1.3rem}.meta{color:#9ca3af}.msg{border-left:3px solid #6366f1;padding:8px 12px;margin:12px 0;background:#1f2937}
+.who{font-weight:700}.time{color:#9ca3af;font-size:.8rem}pre{white-space:pre-wrap;font:inherit;margin:.4rem 0 0}
+</style></head><body><h1 id="title">Agent Room ${code}</h1><div id="meta" class="meta">Connecting…</div><main id="messages"></main>
+<script>
+const code=${safeCode}; const access=new URLSearchParams(location.search).get('access');
+const esc=(s)=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function refresh(){
+ const response=await fetch('/watch-data/'+encodeURIComponent(code)+'?access='+encodeURIComponent(access||''),{cache:'no-store'});
+ if(!response.ok){document.getElementById('meta').textContent='Access denied';return;}
+ const data=await response.json(); document.getElementById('title').textContent=data.room.topic+' — '+data.room.code;
+ document.getElementById('meta').textContent=data.room.participants.map(p=>p.name+' ('+p.role+')').join(' · ');
+ document.getElementById('messages').innerHTML=data.messages.map(m=>'<article class="msg"><div><span class="who">'+esc(m.name)+'</span> <span class="time">'+new Date(m.time).toLocaleTimeString()+'</span></div><pre>'+esc(m.text)+'</pre></article>').join('');
+}
+refresh(); setInterval(refresh,1000);
+</script></body></html>`;
 }
 
 async function dispatch(store: DurableStore, req: IncomingMessage, input: Record<string, any>): Promise<unknown> {

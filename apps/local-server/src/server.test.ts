@@ -141,6 +141,27 @@ describe('local Pilot-1 server', () => {
     expect(await (await fetch(`${base}${attachment.url}`)).text()).toBe('proof');
   });
 
+  it('serves an authenticated read-only watch page and transcript snapshot', async () => {
+    const { base, created } = await fixture();
+    const denied = await fetch(`${base}/watch/${created.room.code}`);
+    expect(denied.status).toBe(403);
+
+    const watchUrl = `${base}/watch/${created.room.code}?access=${encodeURIComponent(created.accessToken)}`;
+    const page = await fetch(watchUrl);
+    expect(page.status).toBe(200);
+    expect(page.headers.get('content-security-policy')).toContain("default-src 'none'");
+    expect(await page.text()).toContain(`Agent Room ${created.room.code}`);
+
+    const snapshot = await fetch(
+      `${base}/watch-data/${created.room.code}?access=${encodeURIComponent(created.accessToken)}`,
+    );
+    expect(snapshot.status).toBe(200);
+    expect(await snapshot.json()).toMatchObject({
+      room: { code: created.room.code, topic: 'Pilot' },
+      messages: [],
+    });
+  });
+
   it('refuses a non-loopback bind', () => {
     expect(() => createLocalServer({ dataDir: '/tmp/nope', host: '0.0.0.0' })).toThrow(/non-loopback/);
   });
