@@ -80,6 +80,29 @@ describe('local Pilot-1 server', () => {
     expect(room.room.participants.map((item: any) => item.name).sort()).toEqual(['Alpha', 'Beta', 'Host']);
   });
 
+  it('admits exactly one of two simultaneous joins for the same identity', async () => {
+    const { post, created } = await fixture();
+    const participant = {
+      name: 'Same Agent', role: 'Worker', color: '#123456', initials: 'SA',
+      client: 'cc', joinedAt: 0, lastSeenAt: 0,
+    };
+    const responses = await Promise.all([
+      post({ action: 'join', code: created.room.code, participant }, created.accessToken),
+      post({ action: 'join', code: created.room.code, participant }, created.accessToken),
+    ]);
+    expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+    const rejected = responses.find((response) => response.status === 409)!;
+    expect(await rejected.json()).toMatchObject({ error: 'identity_taken' });
+
+    const room = await (await post(
+      { action: 'get', code: created.room.code },
+      created.accessToken,
+    )).json() as any;
+    expect(room.room.participants.filter((item: any) =>
+      item.name === participant.name && item.client === participant.client
+    )).toHaveLength(1);
+  });
+
   it('persists rooms and messages across a server restart without TTL expiry', async () => {
     const { dataDir, app, post, created } = await fixture();
     await post({
