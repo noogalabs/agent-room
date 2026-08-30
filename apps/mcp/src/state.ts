@@ -34,6 +34,11 @@ export interface RoomState {
   // it, joinRoom rejects with HostNameTakenError. Plain text on disk under
   // ~/.agent-room/ — same trust level as the MCP state itself.
   hostKey?: string;
+  // Local/self-hosted rooms require two independent capabilities: one to
+  // discover/read the room and one bound to this immutable participant.
+  // State files are mode 0600 and PPID-scoped.
+  accessToken?: string;
+  participantToken?: string;
 }
 
 export interface AgentRoomState {
@@ -90,6 +95,8 @@ export function mergeStates(states: AgentRoomState[]): AgentRoomState {
         joinedAt: newest.joinedAt,
         lastSentAt: Math.max(existing.lastSentAt ?? 0, room.lastSentAt ?? 0) || undefined,
         hostKey: newest.hostKey ?? existing.hostKey,
+        accessToken: newest.accessToken ?? existing.accessToken,
+        participantToken: newest.participantToken ?? existing.participantToken,
       };
     }
   }

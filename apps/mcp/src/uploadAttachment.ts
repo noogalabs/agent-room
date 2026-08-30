@@ -154,6 +154,8 @@ export async function uploadAgentAttachment(
     fetch?: typeof fetch;
     FormData?: typeof FormData;
     Blob?: typeof Blob;
+    accessToken?: string;
+    participantToken?: string;
   } = {},
 ): Promise<MessageAttachment> {
   if (!/^[A-Z0-9]{3}-[A-Z0-9]{3}-[A-Z0-9]{3}$/.test(roomCode)) {
@@ -175,7 +177,14 @@ export async function uploadAgentAttachment(
 
   let resp: Response;
   try {
-    resp = await fetchFn(uploadEndpoint(), { method: 'POST', body: fd as unknown as BodyInit });
+    resp = await fetchFn(uploadEndpoint(), {
+      method: 'POST',
+      headers: {
+        ...(deps.accessToken ? { 'x-agent-room-access': deps.accessToken } : {}),
+        ...(deps.participantToken ? { authorization: `Bearer ${deps.participantToken}` } : {}),
+      },
+      body: fd as unknown as BodyInit,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'network failure';
     throw new AttachmentUploadError('network_error', `POST ${uploadEndpoint()} failed: ${msg}`);

@@ -81,17 +81,32 @@ function apiEndpoint(): string {
 
 export interface RoomApiClient {
   post<T>(payload: Record<string, unknown>): Promise<T>;
+  setCredentials(code: string, credentials: { accessToken?: string; participantToken?: string }): void;
+  getCredentials(code: string): { accessToken?: string; participantToken?: string };
 }
 
 export function createRoomApiClient(): RoomApiClient {
   const endpoint = apiEndpoint();
+  const credentials = new Map<string, { accessToken?: string; participantToken?: string }>();
   return {
+    setCredentials(code, next) {
+      credentials.set(code, { ...credentials.get(code), ...next });
+    },
+    getCredentials(code) {
+      return { ...credentials.get(code) };
+    },
     async post<T>(payload: Record<string, unknown>): Promise<T> {
+      const code = typeof payload.code === 'string' ? payload.code : undefined;
+      const auth = code ? credentials.get(code) : undefined;
       let resp: Response;
       try {
         resp = await fetch(endpoint, {
           method: 'POST',
-          headers: { 'content-type': 'application/json' },
+          headers: {
+            'content-type': 'application/json',
+            ...(auth?.accessToken ? { 'x-agent-room-access': auth.accessToken } : {}),
+            ...(auth?.participantToken ? { authorization: `Bearer ${auth.participantToken}` } : {}),
+          },
           body: JSON.stringify(payload),
           cache: 'no-store',
         });
@@ -107,6 +122,16 @@ export function createRoomApiClient(): RoomApiClient {
       if (!resp.ok) {
         throw errorFromBody(body.error, body.message ?? `Room API failed (${resp.status})`, resp.status);
       }
+      if (typeof body.room === 'object' && body.room !== null) {
+        const responseCode = (body.room as { code?: unknown }).code;
+        if (typeof responseCode === 'string') {
+          credentials.set(responseCode, {
+            ...credentials.get(responseCode),
+            ...(typeof body.accessToken === 'string' ? { accessToken: body.accessToken } : {}),
+            ...(typeof body.participantToken === 'string' ? { participantToken: body.participantToken } : {}),
+          });
+        }
+      }
       return body as T;
     },
   };
@@ -115,15 +140,15 @@ export function createRoomApiClient(): RoomApiClient {
 export async function createRoom(
   client: RoomApiClient,
   input: { topic: string; createdBy: string; projectId?: string; projectKey?: string },
-): Promise<Room & { hostKey: string }> {
-  const body = await client.post<{ room: Room & { hostKey: string }; hostKey: string }>({
+): Promise<Room & { hostKey: string; accessToken?: string }> {
+  const body = await client.post<{ room: Room & { hostKey: string }; hostKey: string; accessToken?: string }>({
     action: 'create',
     topic: input.topic,
     createdBy: input.createdBy,
     // Optional durable-project attach (capability key proves authority).
     ...(input.projectId ? { projectId: input.projectId, projectKey: input.projectKey } : {}),
   });
-  return { ...body.room, hostKey: body.hostKey };
+  return { ...body.room, hostKey: body.hostKey, accessToken: body.accessToken };
 }
 
 export async function getRoom(client: RoomApiClient, code: string): Promise<Room> {
@@ -136,7 +161,7 @@ export async function joinRoom(
   code: string,
   participant: Participant,
   options: { hostKey?: string; priorIdentity?: { name: string; client: 'web' | 'cc' } } = {},
-): Promise<Room & { participant: Participant; agentContext?: string; roomPolicy?: string; policyVersion?: number }> {
+): Promise<Room & { participant: Participant; participantToken?: string; agentContext?: string; roomPolicy?: string; policyVersion?: number }> {
   const body = await client.post<{
     room: Room;
     participant: Participant;
@@ -146,6 +171,7 @@ export async function joinRoom(
     agentContext?: string;
     roomPolicy?: string;
     policyVersion?: number;
+    participantToken?: string;
   }>({
     action: 'join',
     code,
@@ -156,6 +182,7 @@ export async function joinRoom(
   return {
     ...body.room,
     participant: body.participant,
+    participantToken: body.participantToken,
     agentContext: body.agentContext,
     roomPolicy: body.roomPolicy,
     policyVersion: body.policyVersion,

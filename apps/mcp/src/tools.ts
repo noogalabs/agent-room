@@ -660,6 +660,7 @@ export function registerTools(server: Server) {
           required: ['code', 'name'],
           properties: {
             code: { type: 'string', description: '9-character dashed room code, e.g. ABC-DEF-GHJ' },
+            accessToken: { type: 'string', description: 'Private room-access token returned by room_create (required by hardened/self-hosted rooms).' },
             name: { type: 'string', description: 'Your display name' },
             role: { type: 'string', description: 'Your role (optional)' },
             listenAfterJoin: { type: 'boolean', description: 'Default true: run the first listen window in this call.' },
@@ -877,7 +878,7 @@ export function registerTools(server: Server) {
         joinedAt: Date.now(),
         lastSeenAt: Date.now(),
       };
-      await joinRoom(client, code, participant, {
+      const joined = await joinRoom(client, code, participant, {
         hostKey: created.hostKey,
         priorIdentity: { name: a.name, client: 'cc' },
       });
@@ -885,7 +886,12 @@ export function registerTools(server: Server) {
       // Save hostKey alongside cursor so a future room_join from this same
       // PPID can re-claim the host slot. State is PPID-scoped so two
       // parallel sessions don't share keys.
-      await setRoom(code, { name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey });
+      const credentials = client.getCredentials(code);
+      await setRoom(code, {
+        name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey,
+        accessToken: created.accessToken ?? credentials.accessToken,
+        participantToken: joined.participantToken ?? credentials.participantToken,
+      });
 
       const listenAfterJoin = defaultListenAfterJoin(harness, a.listenAfterJoin);
       const listenMs = resolvedListenTimeoutMs(a.listenTimeoutMs, harness.maxListenMs);
@@ -902,6 +908,7 @@ export function registerTools(server: Server) {
           messages: first.messages,
           ...(first.terminated ? { terminated: first.terminated } : {}),
           joinUrl: `https://www.agent-room.com/j/${code}`,
+          ...(created.accessToken ? { accessToken: created.accessToken } : {}),
           roleBrief: roleBriefFor(a.role ?? ''),
           ...(created.projectPrompt ? { projectPrompt: created.projectPrompt, projectPromptVersion: created.projectPromptVersion ?? 1 } : {}),
           ...(created.projectMemoryContext ? { projectMemoryContext: created.projectMemoryContext, projectId: created.projectId, projectName: created.projectName } : {}),
@@ -921,6 +928,7 @@ export function registerTools(server: Server) {
         topic: created.topic,
         cursor: msgs.length,
         joinUrl: `https://www.agent-room.com/j/${code}`,
+        ...(created.accessToken ? { accessToken: created.accessToken } : {}),
         roleBrief: roleBriefFor(a.role ?? ''),
         ...(created.projectPrompt ? { projectPrompt: created.projectPrompt, projectPromptVersion: created.projectPromptVersion ?? 1 } : {}),
         ...(created.projectMemoryContext ? { projectMemoryContext: created.projectMemoryContext, projectId: created.projectId, projectName: created.projectName } : {}),
@@ -945,11 +953,15 @@ export function registerTools(server: Server) {
       // Otherwise, joining as the host's display name is rejected server-side
       // by the join endpoint's verifyHostKey — clean error, no silent
       // impersonation.
-      const targetRoom = await getRoom(client, a.code);
       let storedStateRoom: Awaited<ReturnType<typeof readState>>['rooms'][string] | undefined;
       try {
         storedStateRoom = await readRoomStateForJoin(a.code, a.name);
       } catch { /* local state is optional; treat as fresh join */ }
+      client.setCredentials(a.code, {
+        accessToken: typeof a.accessToken === 'string' ? a.accessToken : storedStateRoom?.accessToken,
+        participantToken: storedStateRoom?.participantToken,
+      });
+      const targetRoom = await getRoom(client, a.code);
       const priorIdentity = storedStateRoom
         ? { name: storedStateRoom.name, client: 'cc' as const }
         : undefined;
@@ -995,7 +1007,12 @@ export function registerTools(server: Server) {
         } catch { /* greeting is nice-to-have; join/listen must still proceed */ }
       }
       const msgs = await listMessages(client, a.code, 0);
-      await setRoom(a.code, { name: finalName, cursor: msgs.length, joinedAt: Date.now() });
+      const credentials = client.getCredentials(a.code);
+      await setRoom(a.code, {
+        name: finalName, cursor: msgs.length, joinedAt: Date.now(),
+        accessToken: credentials.accessToken,
+        participantToken: updated.participantToken ?? credentials.participantToken,
+      });
       const recentMessages = msgs.slice(-20).map((m: Message) => ({
         name: m.name,
         role: m.role,
@@ -1121,9 +1138,14 @@ export function registerTools(server: Server) {
       let attachments: MessageAttachment[] = [];
       if (Array.isArray(a.attachments) && a.attachments.length > 0) {
         try {
+          const roomState = (await readState()).rooms[a.code];
           attachments = await uploadAgentAttachments(
             a.attachments as AgentAttachmentInput[],
             a.code,
+            {
+              accessToken: roomState?.accessToken,
+              participantToken: roomState?.participantToken,
+            },
           );
         } catch (e) {
           if (e instanceof AttachmentUploadError) {
