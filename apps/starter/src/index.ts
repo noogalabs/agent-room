@@ -18,3 +18,7 @@ export type { VerifiedBootstrapArtifact } from './artifact.js';
 export { bootstrapEnvironment, runVerifiedBootstrap } from './runner.js';
 export type { SpawnBootstrap, SpawnInvocation } from './runner.js';
 export { createStarterReceipt } from './receipt.js';
+export { executeBootstrapOffer } from './orchestrator.js';
+export type { ExecuteBootstrapDependencies } from './orchestrator.js';
+export { StarterRoomSession, StarterRoomTransport } from './transport.js';
+export type { BootstrapPoll, StarterIdentity } from './transport.js';
