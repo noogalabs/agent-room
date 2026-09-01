@@ -24,3 +24,9 @@ export { StarterRoomSession, StarterRoomTransport } from './transport.js';
 export type { BootstrapPoll, StarterIdentity } from './transport.js';
 export { checkoutPinnedRevision } from './checkout.js';
 export type { GitInvocation, RunGit } from './checkout.js';
+export { readStarterConfiguration, runStarterOnce } from './cli.js';
+export type {
+  StarterConfiguration,
+  StarterEntrypointDependencies,
+  StarterSession,
+} from './cli.js';
