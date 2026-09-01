@@ -10,3 +10,10 @@ export {
 export type { OfferValidation } from './offer.js';
 export { requestLocalApproval } from './approval.js';
 export type { ApprovalRequest } from './approval.js';
+export {
+  isVerifiedBootstrapArtifact,
+  verifyBootstrapArtifact,
+} from './artifact.js';
+export type { VerifiedBootstrapArtifact } from './artifact.js';
+export { bootstrapEnvironment, runVerifiedBootstrap } from './runner.js';
+export type { SpawnBootstrap, SpawnInvocation } from './runner.js';
