@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readStarterConfiguration, runStarterOnce, type StarterConfiguration } from './cli.js';
+import { StarterTransportError } from './transport.js';
 import type { BootstrapOffer, StarterReceipt } from './contracts.js';
 import { STARTER_REPOSITORY } from './offer.js';
 
@@ -77,6 +78,17 @@ describe('starter entrypoint', () => {
       expect(error).toBeInstanceOf(Error);
       expect((error as Error).message).toBe('starter room connection failed');
       expect((error as Error).message).not.toContain(token);
+      return true;
+    });
+  });
+
+  it('preserves only transport-authored redacted diagnostics', async () => {
+    await expect(runStarterOnce(configuration, {
+      connect: async () => { throw new StarterTransportError('invalid room code'); },
+    })).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(StarterTransportError);
+      expect((error as Error).message).toBe('invalid room code');
+      expect((error as Error)).not.toHaveProperty('cause');
       return true;
     });
   });

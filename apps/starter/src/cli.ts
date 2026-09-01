@@ -7,7 +7,7 @@ import { checkoutPinnedRevision } from './checkout.js';
 import type { BootstrapOffer, StarterReceipt } from './contracts.js';
 import { executeBootstrapOffer } from './orchestrator.js';
 import { requestLocalApproval } from './approval.js';
-import { StarterRoomTransport, type BootstrapPoll, type StarterIdentity } from './transport.js';
+import { StarterRoomTransport, StarterTransportError, type BootstrapPoll, type StarterIdentity } from './transport.js';
 
 export interface StarterConfiguration {
   roomUrl: string;
@@ -62,8 +62,9 @@ export async function runStarterOnce(
   try {
     session = await dependencies.connect(configuration);
     poll = await session.pollBootstrapOffers(0);
-  } catch {
+  } catch (error) {
     // The transport owns secrets; never forward a dependency's diagnostic text.
+    if (error instanceof StarterTransportError) throw error;
     throw new Error('starter room connection failed');
   }
   const receipts: StarterReceipt[] = [];

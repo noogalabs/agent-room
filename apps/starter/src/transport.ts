@@ -16,6 +16,14 @@ export interface BootstrapPoll {
 
 type FetchLike = typeof fetch;
 
+/** A diagnostic authored by this boundary after secret-bearing inputs are removed. */
+export class StarterTransportError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'StarterTransportError';
+  }
+}
+
 export class StarterRoomTransport {
   readonly #baseUrl: string;
   readonly #roomCode: string;
@@ -24,8 +32,8 @@ export class StarterRoomTransport {
 
   constructor(baseUrl: string, roomCode: string, accessToken: string, fetchImpl: FetchLike = fetch) {
     this.#baseUrl = validateBaseUrl(baseUrl);
-    if (!/^[A-Z2-9]{3}-[A-Z2-9]{3}-[A-Z2-9]{3}$/.test(roomCode)) throw new Error('invalid room code');
-    if (accessToken.length < 32) throw new Error('room access token is missing or too short');
+    if (!/^[A-Z2-9]{3}-[A-Z2-9]{3}-[A-Z2-9]{3}$/.test(roomCode)) throw new StarterTransportError('invalid room code');
+    if (accessToken.length < 32) throw new StarterTransportError('room access token is missing or too short');
     this.#roomCode = roomCode;
     this.#accessToken = accessToken;
     this.#fetch = fetchImpl;
@@ -44,7 +52,7 @@ export class StarterRoomTransport {
     );
     const participantToken = readString(result, 'participantToken') ?? resumeParticipantToken;
     if (participantToken === undefined || participantToken.length < 32) {
-      throw new Error('room join did not return a participant capability');
+      throw new StarterTransportError('room join did not return a participant capability');
     }
 
     return new StarterRoomSession(
@@ -69,16 +77,16 @@ export class StarterRoomTransport {
       });
     } catch {
       // A dependency may include request headers or tokens in its own error text.
-      throw new Error('room request failed before a response was received');
+      throw new StarterTransportError('room request failed before a response was received');
     }
-    if (!response.ok) throw new Error(`room request failed with status ${response.status}`);
+    if (!response.ok) throw new StarterTransportError(`room request failed with status ${response.status}`);
     let result: unknown;
     try {
       result = await response.json();
     } catch {
-      throw new Error('room returned malformed JSON');
+      throw new StarterTransportError('room returned malformed JSON');
     }
-    if (!isRecord(result)) throw new Error('room returned a malformed response');
+    if (!isRecord(result)) throw new StarterTransportError('room returned a malformed response');
     return result;
   }
 }
@@ -102,12 +110,12 @@ export class StarterRoomSession {
   }
 
   async pollBootstrapOffers(cursor: number): Promise<BootstrapPoll> {
-    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new Error('cursor must be a non-negative safe integer');
+    if (!Number.isSafeInteger(cursor) || cursor < 0) throw new StarterTransportError('cursor must be a non-negative safe integer');
     const result = await this.#post(
       { action: 'messages', code: this.#roomCode, cursor },
       this.#participantToken,
     );
-    if (!Array.isArray(result.messages)) throw new Error('room returned malformed messages');
+    if (!Array.isArray(result.messages)) throw new StarterTransportError('room returned malformed messages');
 
     const accepted: OfferValidation[] = [];
     for (const value of result.messages) {
@@ -138,11 +146,16 @@ export class StarterRoomSession {
 }
 
 function validateBaseUrl(input: string): string {
-  const url = new URL(input);
-  if (url.username || url.password || url.search || url.hash) throw new Error('room URL must not contain credentials, query, or fragment');
+  let url: URL;
+  try {
+    url = new URL(input);
+  } catch {
+    throw new StarterTransportError('room URL is invalid');
+  }
+  if (url.username || url.password || url.search || url.hash) throw new StarterTransportError('room URL must not contain credentials, query, or fragment');
   const loopback = ['127.0.0.1', '::1', 'localhost'].includes(url.hostname);
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback)) {
-    throw new Error('room URL must use HTTPS except on loopback');
+    throw new StarterTransportError('room URL must use HTTPS except on loopback');
   }
   return url.toString().replace(/\/$/, '');
 }

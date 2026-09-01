@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { StarterRoomTransport } from './transport.js';
+import { StarterRoomTransport, StarterTransportError } from './transport.js';
 
 const roomCode = 'ABC-DEF-GHJ';
 const accessToken = 'a'.repeat(32);
@@ -18,10 +18,11 @@ describe('StarterRoomTransport refusal boundary', () => {
   it.each([
     ['URL credentials', 'https://user:password@example.com', roomCode, accessToken, 'credentials'],
     ['non-loopback HTTP', 'http://example.com', roomCode, accessToken, 'HTTPS'],
-    ['invalid URL through validator', 'not a URL', roomCode, accessToken, 'Invalid URL'],
+    ['invalid URL through validator', 'not a URL', roomCode, accessToken, 'room URL is invalid'],
     ['malformed room code', 'https://example.com', 'abc', accessToken, 'invalid room code'],
     ['short room access token', 'https://example.com', roomCode, 'a'.repeat(31), 'too short'],
   ])('refuses %s', (_case, baseUrl, code, token, reason) => {
+    expect(() => new StarterRoomTransport(baseUrl, code, token)).toThrowError(StarterTransportError);
     expect(() => new StarterRoomTransport(baseUrl, code, token)).toThrow(reason);
   });
 
