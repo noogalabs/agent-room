@@ -22,3 +22,5 @@ export { executeBootstrapOffer } from './orchestrator.js';
 export type { ExecuteBootstrapDependencies } from './orchestrator.js';
 export { StarterRoomSession, StarterRoomTransport } from './transport.js';
 export type { BootstrapPoll, StarterIdentity } from './transport.js';
+export { checkoutPinnedRevision } from './checkout.js';
+export type { GitInvocation, RunGit } from './checkout.js';
