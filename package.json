@@ -7,7 +7,7 @@
     "apps/*"
   ],
   "scripts": {
-    "test": "npm -ws run test --if-present",
+    "test": "node scripts/check-test-workspaces.mjs && npm -ws run test",
     "build": "npm -ws run build --if-present",
     "dev:web": "npm -w apps/web run dev"
   },
