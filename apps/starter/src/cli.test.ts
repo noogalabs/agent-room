@@ -69,4 +69,15 @@ describe('starter entrypoint', () => {
     expect(checkout).not.toHaveBeenCalled();
     expect(logs).toEqual(['Rejected bootstrap offer: invalid schema']);
   });
+
+  it('redacts transport dependency errors at the CLI boundary', async () => {
+    await expect(runStarterOnce(configuration, {
+      connect: async () => { throw new Error(`fetch failed with ${token}`); },
+    })).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('starter room connection failed');
+      expect((error as Error).message).not.toContain(token);
+      return true;
+    });
+  });
 });

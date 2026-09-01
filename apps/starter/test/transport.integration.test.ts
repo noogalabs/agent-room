@@ -74,6 +74,8 @@ describe('starter room contract', () => {
       { action: 'messages', code: created.room.code, cursor: 0 },
       created.accessToken,
     )).json() as any;
+    // Load-bearing receipt-shape guard: do not weaken to toMatchObject. Extra
+    // fields are an egress failure even when every expected field is present.
     expect(JSON.parse(messages.messages.at(-1).text)).toEqual(receipt);
     expect(messages.messages.at(-1).text).not.toMatch(/TOKEN|SECRET|stdout|stderr|env/i);
   });

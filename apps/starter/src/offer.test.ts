@@ -18,7 +18,11 @@ describe('parseBootstrapOffer', () => {
     {},
     { ...validOffer, repository: 'https://attacker.invalid/payload.git' },
     { ...validOffer, revision: 'main' },
+    { ...validOffer, revision: 'a'.repeat(39) },
+    { ...validOffer, revision: 'A'.repeat(40) },
     { ...validOffer, artifactSha256: 'not-a-digest' },
+    { ...validOffer, artifactSha256: 'b'.repeat(63) },
+    { ...validOffer, artifactSha256: 'B'.repeat(64) },
   ])('rejects malformed or unpinned input: %j', (input) => {
     expect(parseBootstrapOffer(input)).toMatchObject({ accepted: false });
   });

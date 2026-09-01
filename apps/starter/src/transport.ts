@@ -56,17 +56,28 @@ export class StarterRoomTransport {
   }
 
   async #post(payload: object, participantToken?: string): Promise<Record<string, unknown>> {
-    const response = await this.#fetch(`${this.#baseUrl}/api/room`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-agent-room-access': this.#accessToken,
-        ...(participantToken === undefined ? {} : { authorization: `Bearer ${participantToken}` }),
-      },
-      body: JSON.stringify(payload),
-    });
+    let response: Response;
+    try {
+      response = await this.#fetch(`${this.#baseUrl}/api/room`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-agent-room-access': this.#accessToken,
+          ...(participantToken === undefined ? {} : { authorization: `Bearer ${participantToken}` }),
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      // A dependency may include request headers or tokens in its own error text.
+      throw new Error('room request failed before a response was received');
+    }
     if (!response.ok) throw new Error(`room request failed with status ${response.status}`);
-    const result: unknown = await response.json();
+    let result: unknown;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error('room returned malformed JSON');
+    }
     if (!isRecord(result)) throw new Error('room returned a malformed response');
     return result;
   }

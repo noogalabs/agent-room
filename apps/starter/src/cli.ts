@@ -57,8 +57,15 @@ export async function runStarterOnce(
   dependencies: StarterEntrypointDependencies,
 ): Promise<readonly StarterReceipt[]> {
   const log = dependencies.log ?? console.log;
-  const session = await dependencies.connect(configuration);
-  const poll = await session.pollBootstrapOffers(0);
+  let session: StarterSession;
+  let poll: BootstrapPoll;
+  try {
+    session = await dependencies.connect(configuration);
+    poll = await session.pollBootstrapOffers(0);
+  } catch {
+    // The transport owns secrets; never forward a dependency's diagnostic text.
+    throw new Error('starter room connection failed');
+  }
   const receipts: StarterReceipt[] = [];
   for (const candidate of poll.accepted) {
     if (!candidate.accepted) {
