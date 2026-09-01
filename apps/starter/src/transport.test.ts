@@ -14,16 +14,20 @@ function response(body: unknown, options: { ok?: boolean; status?: number } = {}
   } as Response;
 }
 
+function anchored(message: string): RegExp {
+  return new RegExp(`^${message.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+}
+
 describe('StarterRoomTransport refusal boundary', () => {
   it.each([
-    ['URL credentials', 'https://user:password@example.com', roomCode, accessToken, 'credentials'],
-    ['non-loopback HTTP', 'http://example.com', roomCode, accessToken, 'HTTPS'],
+    ['URL credentials', 'https://user:password@example.com', roomCode, accessToken, 'room URL must not contain credentials, query, or fragment'],
+    ['non-loopback HTTP', 'http://example.com', roomCode, accessToken, 'room URL must use HTTPS except on loopback'],
     ['invalid URL through validator', 'not a URL', roomCode, accessToken, 'room URL is invalid'],
     ['malformed room code', 'https://example.com', 'abc', accessToken, 'invalid room code'],
-    ['short room access token', 'https://example.com', roomCode, 'a'.repeat(31), 'too short'],
+    ['short room access token', 'https://example.com', roomCode, 'a'.repeat(31), 'room access token is missing or too short'],
   ])('refuses %s', (_case, baseUrl, code, token, reason) => {
     expect(() => new StarterRoomTransport(baseUrl, code, token)).toThrowError(StarterTransportError);
-    expect(() => new StarterRoomTransport(baseUrl, code, token)).toThrow(reason);
+    expect(() => new StarterRoomTransport(baseUrl, code, token)).toThrow(anchored(reason));
   });
 
   it('refuses a short participant capability returned by join', async () => {
