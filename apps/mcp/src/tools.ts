@@ -454,15 +454,19 @@ export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: 
   const reader = resp.body.getReader();
   const chunks: Uint8Array[] = [];
   let byteLength = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    byteLength += value.byteLength;
-    if (byteLength > maxBytes) {
-      await reader.cancel().catch(() => undefined);
-      throw new Error(`Attachment exceeds ${maxBytes} bytes; this reader caps downloads at ${maxBytes} bytes.`);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`Attachment exceeds ${maxBytes} bytes; this reader caps downloads at ${maxBytes} bytes.`);
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    reader.releaseLock();
   }
 
   const bytes = new Uint8Array(byteLength);
