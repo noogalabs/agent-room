@@ -157,6 +157,9 @@ export async function readRoomStateForCredentials(code: string): Promise<RoomSta
   if (!preferred) return undefined;
   return {
     ...preferred,
+    cursor: Math.max(...sources.map((room) => room.cursor)),
+    lastSentAt: Math.max(...sources.map((room) => room.lastSentAt ?? 0)) || undefined,
+    hostKey: sources.find((room) => room.hostKey)?.hostKey,
     accessToken: sources.find((room) => room.accessToken)?.accessToken,
     participantToken: sources.find((room) => room.participantToken)?.participantToken,
   };

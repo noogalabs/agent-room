@@ -181,6 +181,34 @@ describe('state harness files', () => {
       cursor: 7,
     });
   });
+
+  it('resolves room identity fields from scoped state without crossing participants', async () => {
+    const dir = await makeStateDir('agent-room-state-identity-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_RUN_ID', 'test-run');
+    const code = 'ABC-DEF-GHJ';
+    await fs.writeFile(join(dir, `state-${process.ppid}.json`), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session A', client: 'cc', cursor: 3, joinedAt: 10 } },
+    }));
+    await fs.writeFile(join(dir, 'state-111.json'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session A', client: 'cc', cursor: 9, joinedAt: 9, hostKey: 'host-a' } },
+    }));
+    await fs.writeFile(join(dir, 'state-222.json'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session B', client: 'cc', cursor: 99, joinedAt: 99, hostKey: 'host-b' } },
+    }));
+
+    vi.resetModules();
+    const { readRoomStateForCredentials } = await import('../src/state.js');
+    expect(await readRoomStateForCredentials(code)).toMatchObject({
+      name: 'Session A', cursor: 9, hostKey: 'host-a',
+    });
+  });
+
+  it('tools resolve room names and host keys through the identity-scoped reader', async () => {
+    const source = await fs.readFile(join(import.meta.dirname, '../src/tools.ts'), 'utf8');
+    expect(source).not.toMatch(/\breadState\s*\(/);
+    expect(source.match(/readRoomStateForCredentials\s*\(/g)?.length).toBeGreaterThanOrEqual(5);
+  });
 });
 
 describe('state lock', () => {
