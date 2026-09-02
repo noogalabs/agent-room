@@ -27,3 +27,6 @@ HANDOFF.md
 agentroom-research-report.html
 agent_room_cleanup.md
 dist-mcpb
+
+# Local Pilot-1 runtime state (room credentials, history, attachments)
+.agent-room-local/

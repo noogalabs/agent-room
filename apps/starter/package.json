@@ -1,0 +1,20 @@
+{
+  "name": "@agent-room/starter",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "agent-room-starter": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@agent-room/shared": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vitest": "^1.5.0"
+  }
+}
