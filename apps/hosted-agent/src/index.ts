@@ -2,7 +2,8 @@ import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createLocalServer } from '@agent-room/local-server';
 import type { Message } from '@agent-room/shared';
-import { buildBootstrapOffer, HOSTED_IDENTITY, makeMessage, planReplies } from './agent.js';
+import { buildBootstrapOffer, HOSTED_IDENTITY, makeMessage } from './agent.js';
+import { pollOnce } from './loop.js';
 
 /**
  * Hosted agent: runs the fork room server in-process (public bind behind the
@@ -58,18 +59,20 @@ async function main(): Promise<void> {
   }
   process.stdout.write(`hosted agent in room ${state.code}, polling every ${pollMs}ms\n`);
 
+  const io = {
+    read: async (cursor: number) => {
+      const result = await post(local, { action: 'messages', code: state.code, cursor }, auth);
+      return Array.isArray(result.messages) ? (result.messages as Message[]) : [];
+    },
+    send: async (message: Message) => {
+      await send(local, state.code, auth, message);
+      process.stdout.write(`replied: ${message.text}\n`);
+    },
+  };
   for (;;) {
     try {
-      const result = await post(local, { action: 'messages', code: state.code, cursor: state.cursor }, auth);
-      const messages = Array.isArray(result.messages) ? (result.messages as Message[]) : [];
-      const plan = planReplies(messages, state.cursor, HOSTED_IDENTITY.name);
-      for (const text of plan.replies) {
-        await send(local, state.code, auth, makeMessage(text));
-        process.stdout.write(`replied: ${text}\n`);
-      }
-      // Skip past our own replies so they are never re-read as inbound.
-      state.cursor = plan.cursor + plan.replies.length;
-      if (plan.replies.length > 0) await saveState(state);
+      const replies = await pollOnce(state, io);
+      if (replies.length > 0) await saveState(state);
     } catch (error) {
       process.stderr.write(`poll failed: ${error instanceof Error ? error.message : String(error)}\n`);
     }
