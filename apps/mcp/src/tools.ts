@@ -432,11 +432,34 @@ export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: 
   const target = resolveAttachmentUrl(url);
   const resp = await fetchFn(target, { headers: attachmentAuthHeaders(target, auth) });
   if (!resp.ok) throw new Error(`GET ${redactUrl(target)} returned ${resp.status}.`);
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  if (buf.byteLength > maxBytes) {
-    throw new Error(`Attachment is ${buf.byteLength} bytes; this reader caps downloads at ${maxBytes} bytes.`);
+
+  const contentLength = resp.headers.get('content-length')?.trim();
+  if (contentLength && /^\d+$/.test(contentLength) && BigInt(contentLength) > BigInt(maxBytes)) {
+    throw new Error(`Attachment is ${contentLength} bytes; this reader caps downloads at ${maxBytes} bytes.`);
   }
-  return buf;
+
+  if (!resp.body) throw new Error(`GET ${redactUrl(target)} returned no readable attachment body.`);
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    byteLength += value.byteLength;
+    if (byteLength > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new Error(`Attachment exceeds ${maxBytes} bytes; this reader caps downloads at ${maxBytes} bytes.`);
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
 }
 
 export async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; image?: string; blob?: string; mime?: string; source: string; warning?: string }> {

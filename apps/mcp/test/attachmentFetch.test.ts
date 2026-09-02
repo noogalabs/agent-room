@@ -40,6 +40,60 @@ describe('room capability never leaves the room origin', () => {
   });
 });
 
+describe('attachment download size boundary', () => {
+  it('rejects an oversized Content-Length before reading the body', async () => {
+    const bodyRead = vi.fn();
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'content-length': '1025' }),
+      get body() { bodyRead(); throw new Error('body must not be read'); },
+      arrayBuffer: vi.fn(() => { throw new Error('arrayBuffer must not be called'); }),
+    } as unknown as Response;
+    const fetchFn = vi.fn(async () => response) as unknown as typeof fetch;
+
+    await expect(fetchAttachmentBytes('/attachments/too-large.bin', 1024, {}, fetchFn))
+      .rejects.toThrow('Attachment is 1025 bytes');
+    expect(bodyRead).not.toHaveBeenCalled();
+    expect(response.arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('cancels a chunked stream as soon as its cumulative bytes exceed the cap', async () => {
+    const cancel = vi.fn(async () => undefined);
+    const chunks = [new Uint8Array(6), new Uint8Array(5), new Uint8Array(99)];
+    let index = 0;
+    const read = vi.fn(async () => index < chunks.length
+      ? { done: false as const, value: chunks[index++] }
+      : { done: true as const, value: undefined });
+    const arrayBuffer = vi.fn(() => { throw new Error('arrayBuffer must not be called'); });
+    const response = {
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      body: { getReader: () => ({ read, cancel }) },
+      arrayBuffer,
+    } as unknown as Response;
+    const fetchFn = vi.fn(async () => response) as unknown as typeof fetch;
+
+    await expect(fetchAttachmentBytes('/attachments/chunked.bin', 10, {}, fetchFn))
+      .rejects.toThrow('Attachment exceeds 10 bytes');
+    expect(read).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+
+  it('returns exact bytes from an under-cap streamed body without arrayBuffer', async () => {
+    const arrayBuffer = vi.fn(() => { throw new Error('arrayBuffer must not be called'); });
+    const response = new Response(new Uint8Array([1, 3, 5, 7]), { status: 200 });
+    Object.defineProperty(response, 'arrayBuffer', { value: arrayBuffer });
+    const fetchFn = vi.fn(async () => response) as unknown as typeof fetch;
+
+    await expect(fetchAttachmentBytes('/attachments/small.bin', 4, {}, fetchFn))
+      .resolves.toEqual(new Uint8Array([1, 3, 5, 7]));
+    expect(arrayBuffer).not.toHaveBeenCalled();
+  });
+});
+
 describe('self-hosted image attachments', () => {
   it('returns the image bytes through the authenticated reader instead of a url the caller cannot open', async () => {
     process.env.AGENT_ROOM_BASE_URL = 'https://room.example';
