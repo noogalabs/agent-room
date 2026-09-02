@@ -21,11 +21,12 @@ describe('urls in errors and logs carry no capability', () => {
     expect(message).toContain('/attachments/ABC-x.txt');
     expect(message).not.toContain('legacy-secret-capability');
     expect(message).not.toContain('access=');
-    const unsupported = await readAttachmentText(
-      { id: 'u', type: 'file', url, storageKey: 'k', name: 'x.bin', size: 1, mime: 'application/x-unknown', uploadedAt: 1 },
-      100,
-    );
-    expect(unsupported.warning).toContain('/attachments/ABC-x.txt');
-    expect(unsupported.warning).not.toContain('legacy-secret-capability');
+    // A blob-read failure surfaces the same redacted message.
+    vi.stubGlobal('fetch', fetchFn);
+    let blobMessage = '';
+    try { await readAttachmentText({ id: 'u', type: 'file', url, storageKey: 'k', name: 'x.bin', size: 1, mime: 'application/x-unknown', uploadedAt: 1 }, 100); }
+    catch (error) { blobMessage = (error as Error).message; }
+    expect(blobMessage).toContain('/attachments/ABC-x.txt');
+    expect(blobMessage).not.toContain('legacy-secret-capability');
   });
 });

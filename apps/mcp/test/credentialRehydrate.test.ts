@@ -38,7 +38,7 @@ describe('room credential rehydration after restart', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-room-cred-'));
     process.env.AGENT_ROOM_STATE_FILE = join(dir, 'state.json');
     vi.resetModules();
-    const { stateCredentialLoader } = await import('../src/credentials.js');
+    const { toolCredentialLoader: stateCredentialLoader } = await import('../src/credentials.js');
     await writeFile(process.env.AGENT_ROOM_STATE_FILE, JSON.stringify({
       version: 1,
       rooms: { 'ABC-DEF-GHJ': { code: 'ABC-DEF-GHJ', name: 'Me', role: 'Dev', cursor: 0, joinedAt: 1, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },

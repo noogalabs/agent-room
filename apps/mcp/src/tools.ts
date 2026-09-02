@@ -35,7 +35,7 @@ import {
   type RoomApiClient,
   apiBaseUrl,
 } from './roomApi.js';
-import { stateCredentialLoader } from './credentials.js';
+import { toolCredentialLoader } from './credentials.js';
 import { redactUrl } from './redact.js';
 import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
 import type {
@@ -80,6 +80,37 @@ function colorForName(name: string): string {
   let h = 0;
   for (let i = 0; i < safe.length; i++) h = (h * 31 + safe.charCodeAt(i)) | 0;
   return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length]!;
+}
+
+/**
+ * Image and blob reads are emitted as real MCP content items (an image block a
+ * vision client can see, a resource block with the bytes), plus a text summary.
+ * Stringifying the base64 into the text item would hand a vision client a
+ * string, not pixels.
+ */
+export function attachmentReadResult(
+  attachment: MessageAttachment,
+  message: unknown,
+  read: { text?: string; image?: string; blob?: string; mime?: string; source: string; warning?: string },
+) {
+  const mimeType = read.mime || attachment.mime || 'application/octet-stream';
+  // Binary results echo the attachment without its url: the bytes are in the
+  // content item, and a protected relative path is useless to the caller.
+  const { url: _protectedUrl, ...meta } = attachment;
+  const summary = { ok: true, attachment: read.image !== undefined || read.blob !== undefined ? meta : attachment, message, source: read.source, text: read.text, warning: read.warning };
+  if (read.image !== undefined) {
+    return { content: [
+      { type: 'image' as const, data: read.image, mimeType },
+      { type: 'text' as const, text: JSON.stringify({ ...summary, mime: mimeType }, null, 2) },
+    ] };
+  }
+  if (read.blob !== undefined) {
+    return { content: [
+      { type: 'resource' as const, resource: { uri: `attachment://${attachment.id}/${encodeURIComponent(attachment.name)}`, mimeType, blob: read.blob } },
+      { type: 'text' as const, text: JSON.stringify({ ...summary, mime: mimeType, name: attachment.name, size: attachment.size }, null, 2) },
+    ] };
+  }
+  return ok(summary);
 }
 
 function ok(value: unknown) {
@@ -408,7 +439,7 @@ export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: 
   return buf;
 }
 
-export async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; image?: string; mime?: string; source: string; warning?: string }> {
+export async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; image?: string; blob?: string; mime?: string; source: string; warning?: string }> {
   const existing = a.extractedText?.trim();
   if (existing) return { text: existing.slice(0, maxChars), source: 'stored_extractedText' };
 
@@ -442,10 +473,12 @@ export async function readAttachmentText(a: MessageAttachment, maxChars: number,
     return { text: String(result.value ?? '').trim().slice(0, maxChars), source: 'fetched_docx' };
   }
 
-  return {
-    source: 'unsupported',
-    warning: `No MCP reader for ${a.mime}. Download/open the URL with a suitable local tool: ${redactUrl(a.url)}`,
-  };
+  // Allowed but not text-extractable (zip, xls, ...): the URL may be a protected
+  // self-hosted path the caller cannot open, so hand back the bytes as a blob
+  // through the authenticated reader. Above the cap the size error surfaces as
+  // text (never a raw protected url).
+  const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
+  return { source: 'fetched_blob', blob: Buffer.from(bytes).toString('base64'), mime: a.mime || 'application/octet-stream' };
 }
 
 /** Long-poll for new messages; shared by room_listen and post-join/create first listen. */
@@ -580,7 +613,7 @@ async function readHostKey(code: string): Promise<string | undefined> {
 }
 
 export function registerTools(server: Server) {
-  const client = createRoomApiClient({ loadCredentials: stateCredentialLoader });
+  const client = createRoomApiClient({ loadCredentials: toolCredentialLoader });
   // Snapshot the host harness once at boot. This drives the persistence-setup
   // nudge in room_join / room_create — agents on harnesses that don't
   // auto-loop tool calls (Cursor without 1.7+ stop hook, Antigravity, etc.)
@@ -1162,13 +1195,13 @@ export function registerTools(server: Server) {
       let attachments: MessageAttachment[] = [];
       if (Array.isArray(a.attachments) && a.attachments.length > 0) {
         try {
-          const roomState = (await readState()).rooms[a.code];
+          const credentials = await toolCredentialLoader(a.code);
           attachments = await uploadAgentAttachments(
             a.attachments as AgentAttachmentInput[],
             a.code,
             {
-              accessToken: roomState?.accessToken,
-              participantToken: roomState?.participantToken,
+              accessToken: credentials?.accessToken,
+              participantToken: credentials?.participantToken,
             },
           );
         } catch (e) {
@@ -1531,17 +1564,9 @@ export function registerTools(server: Server) {
         ? Math.min(Math.max(1000, Math.floor(maxCharsRaw)), 30_000)
         : 12_000;
       try {
-        const roomState = (await readState()).rooms[a.code];
-        const read = await readAttachmentText(hit.attachment, maxChars, { accessToken: roomState?.accessToken });
-        return ok({
-          ok: true,
-          attachment: hit.attachment,
-          message: hit.message,
-          source: read.source,
-          text: read.text,
-          ...(read.image === undefined ? {} : { image: read.image, mime: read.mime }),
-          warning: read.warning,
-        });
+        // Same harness-aware scope as the room client: a PPID-scoped read misses after a Cursor/Codex restart.
+        const read = await readAttachmentText(hit.attachment, maxChars, { accessToken: (await toolCredentialLoader(a.code))?.accessToken });
+        return attachmentReadResult(hit.attachment, hit.message, read);
       } catch (e) {
         return ok({
           ok: false,
