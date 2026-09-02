@@ -165,6 +165,18 @@ export async function readRoomStateForCredentials(code: string): Promise<RoomSta
   };
 }
 
+/**
+ * Resolve interactive tool identity without crossing ordinary PPID sessions.
+ * Cursor and Codex need the durable harness recovery path because their MCP
+ * process identity changes across restarts; other harnesses share the current
+ * PPID state file and must never inherit a foreign session's host capability.
+ */
+export async function readRoomStateForSession(code: string): Promise<RoomState | undefined> {
+  const kind = detectHarness().kind;
+  if (kind === 'cursor' || kind === 'codex') return readRoomStateForCredentials(code);
+  return (await readState()).rooms[code];
+}
+
 export async function readRoomStateForJoin(code: string, desiredName: string): Promise<RoomState | undefined> {
   const current = (await readState()).rooms[code];
   if (current) return current;

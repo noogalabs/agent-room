@@ -207,7 +207,38 @@ describe('state harness files', () => {
   it('tools resolve room names and host keys through the identity-scoped reader', async () => {
     const source = await fs.readFile(join(import.meta.dirname, '../src/tools.ts'), 'utf8');
     expect(source).not.toMatch(/\breadState\s*\(/);
-    expect(source.match(/readRoomStateForCredentials\s*\(/g)?.length).toBeGreaterThanOrEqual(5);
+    expect(source.match(/readRoomStateForSession\s*\(/g)?.length).toBeGreaterThanOrEqual(5);
+  });
+
+  it('does not recover a foreign PPID host key for an ordinary harness session', async () => {
+    const dir = await makeStateDir('agent-room-state-foreign-host-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_RUN_ID', '');
+    vi.stubEnv('CLAUDECODE', '1');
+    const code = 'ABC-DEF-GHJ';
+    await fs.writeFile(join(dir, 'state-111.json'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Foreign Host', client: 'cc', cursor: 7, joinedAt: 10, hostKey: 'foreign-host-key' } },
+    }));
+
+    vi.resetModules();
+    const { readRoomStateForSession } = await import('../src/state.js');
+    expect(await readRoomStateForSession(code)).toBeUndefined();
+  });
+
+  it('recovers the current Codex participant after its PPID changes', async () => {
+    const dir = await makeStateDir('agent-room-state-codex-host-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_RUN_ID', 'test-run');
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    const code = 'ABC-DEF-GHJ';
+    await fs.writeFile(join(dir, 'state-harness-codex.json'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Codex Host', client: 'cc', cursor: 7, joinedAt: 10, hostKey: 'codex-host-key' } },
+    }));
+
+    vi.resetModules();
+    const { readRoomStateForSession } = await import('../src/state.js');
+    expect(await readRoomStateForSession(code)).toMatchObject({ name: 'Codex Host', hostKey: 'codex-host-key' });
   });
 });
 

@@ -48,7 +48,7 @@ import type {
   Room,
   TaskBoard,
 } from '@agent-room/shared';
-import { setRoom, removeRoom, updateCursor, markSent, readRoomStateForCredentials, readRoomStateForJoin } from './state.js';
+import { setRoom, removeRoom, updateCursor, markSent, readRoomStateForJoin, readRoomStateForSession } from './state.js';
 import {
   detectHarness,
   defaultListenAfterJoin,
@@ -645,7 +645,7 @@ function resolvedListenTimeoutMs(raw: unknown, maxListenMs: number): number {
 // no hostKey and the server will reject the host action with NotHostError.
 async function readHostKey(code: string): Promise<string | undefined> {
   try {
-    return (await readRoomStateForCredentials(code))?.hostKey;
+    return (await readRoomStateForSession(code))?.hostKey;
   } catch {
     return undefined;
   }
@@ -1433,7 +1433,7 @@ export function registerTools(server: Server) {
       let selfName = a.name as string | undefined;
       if (!selfName) {
         try {
-          selfName = (await readRoomStateForCredentials(a.code))?.name;
+          selfName = (await readRoomStateForSession(a.code))?.name;
         } catch { /* state unavailable */ }
       }
       const timeoutMs = resolvedListenTimeoutMs(a.timeoutMs, harness.maxListenMs);
@@ -1490,7 +1490,7 @@ export function registerTools(server: Server) {
       let requesterName: string | undefined =
         typeof a.name === 'string' && a.name.trim() ? a.name.trim() : undefined;
       if (!requesterName) {
-        try { requesterName = (await readRoomStateForCredentials(a.code))?.name; } catch { /* state unavailable */ }
+        try { requesterName = (await readRoomStateForSession(a.code))?.name; } catch { /* state unavailable */ }
       }
       try {
         await endRoom(client, a.code, requesterName ?? '', await readHostKey(a.code));
@@ -1521,7 +1521,7 @@ export function registerTools(server: Server) {
         ? a.name.trim()
         : undefined;
       try {
-        selfName = selfName ?? (await readRoomStateForCredentials(a.code))?.name;
+        selfName = selfName ?? (await readRoomStateForSession(a.code))?.name;
       } catch { /* state unavailable */ }
       if (selfName) {
         try {
@@ -1543,7 +1543,7 @@ export function registerTools(server: Server) {
       let requesterName: string | undefined =
         typeof a.name === 'string' && a.name.trim() ? a.name.trim() : undefined;
       if (!requesterName) {
-        try { requesterName = (await readRoomStateForCredentials(a.code))?.name; } catch { /* state unavailable */ }
+        try { requesterName = (await readRoomStateForSession(a.code))?.name; } catch { /* state unavailable */ }
       }
       try {
         await reactivateRoom(client, a.code, requesterName ?? '', await readHostKey(a.code));
