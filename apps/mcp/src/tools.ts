@@ -33,7 +33,10 @@ import {
   InvalidModeConfigError,
   ModeNotSupportedError,
   type RoomApiClient,
+  apiBaseUrl,
 } from './roomApi.js';
+import { toolCredentialLoader } from './credentials.js';
+import { redactUrl } from './redact.js';
 import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
 import type {
   Message,
@@ -79,6 +82,37 @@ function colorForName(name: string): string {
   return AVATAR_PALETTE[Math.abs(h) % AVATAR_PALETTE.length]!;
 }
 
+/**
+ * Image and blob reads are emitted as real MCP content items (an image block a
+ * vision client can see, a resource block with the bytes), plus a text summary.
+ * Stringifying the base64 into the text item would hand a vision client a
+ * string, not pixels.
+ */
+export function attachmentReadResult(
+  attachment: MessageAttachment,
+  message: unknown,
+  read: { text?: string; image?: string; blob?: string; mime?: string; source: string; warning?: string },
+) {
+  const mimeType = read.mime || attachment.mime || 'application/octet-stream';
+  // Binary results echo the attachment without its url: the bytes are in the
+  // content item, and a protected relative path is useless to the caller.
+  const { url: _protectedUrl, ...meta } = attachment;
+  const summary = { ok: true, attachment: read.image !== undefined || read.blob !== undefined ? meta : attachment, message, source: read.source, text: read.text, warning: read.warning };
+  if (read.image !== undefined) {
+    return { content: [
+      { type: 'image' as const, data: read.image, mimeType },
+      { type: 'text' as const, text: JSON.stringify({ ...summary, mime: mimeType }, null, 2) },
+    ] };
+  }
+  if (read.blob !== undefined) {
+    return { content: [
+      { type: 'resource' as const, resource: { uri: `attachment://${attachment.id}/${encodeURIComponent(attachment.name)}`, mimeType, blob: read.blob } },
+      { type: 'text' as const, text: JSON.stringify({ ...summary, mime: mimeType, name: attachment.name, size: attachment.size }, null, 2) },
+    ] };
+  }
+  return ok(summary);
+}
+
 function ok(value: unknown) {
   return {
     content: [
@@ -100,6 +134,7 @@ export const CORE_PROFILE_TOOLS = new Set([
   'room_join',
   'room_send',
   'room_listen',
+  'room_attachment_read',
   'room_minutes',
   'room_leave',
   'room_end',
@@ -375,36 +410,96 @@ function canReadAsText(a: MessageAttachment): boolean {
     /\.(txt|md|markdown|csv|json|html?|svg|log)$/i.test(a.name);
 }
 
-async function fetchAttachmentBytes(url: string, maxBytes: number): Promise<Uint8Array> {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`GET ${url} returned ${resp.status}.`);
-  const buf = new Uint8Array(await resp.arrayBuffer());
-  if (buf.byteLength > maxBytes) {
-    throw new Error(`Attachment is ${buf.byteLength} bytes; this reader caps downloads at ${maxBytes} bytes.`);
-  }
-  return buf;
+export interface AttachmentFetchAuth {
+  accessToken?: string;
 }
 
-async function readAttachmentText(a: MessageAttachment, maxChars: number): Promise<{ text?: string; source: string; warning?: string }> {
+/**
+ * Local/self-hosted rooms return attachment URLs relative to the room API
+ * base and no longer embed the room capability, so the reader resolves the
+ * URL against AGENT_ROOM_BASE_URL and presents the token as a header.
+ */
+export function resolveAttachmentUrl(url: string, base: string = apiBaseUrl()): string {
+  return new URL(url, `${base}/`).toString();
+}
+
+/** The room capability travels only to the room's own origin, never to a third-party attachment host. */
+export function attachmentAuthHeaders(target: string, auth: AttachmentFetchAuth, base: string = apiBaseUrl()): Record<string, string> {
+  if (!auth.accessToken) return {};
+  return new URL(target).origin === new URL(base).origin ? { 'x-agent-room-access': auth.accessToken } : {};
+}
+
+export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: AttachmentFetchAuth = {}, fetchFn: typeof fetch = fetch): Promise<Uint8Array> {
+  let target = resolveAttachmentUrl(url);
+  let resp: Response | undefined;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    resp = await fetchFn(target, {
+      headers: attachmentAuthHeaders(target, auth),
+      redirect: 'manual',
+    });
+    if (![301, 302, 303, 307, 308].includes(resp.status)) break;
+    if (redirects === 5) throw new Error(`GET ${redactUrl(target)} exceeded 5 redirects.`);
+    const location = resp.headers.get('location');
+    if (!location) throw new Error(`GET ${redactUrl(target)} returned ${resp.status} without a Location header.`);
+    target = new URL(location, target).toString();
+  }
+  if (!resp) throw new Error(`GET ${redactUrl(target)} returned no response.`);
+  if (!resp.ok) throw new Error(`GET ${redactUrl(target)} returned ${resp.status}.`);
+
+  const contentLength = resp.headers.get('content-length')?.trim();
+  if (contentLength && /^\d+$/.test(contentLength) && BigInt(contentLength) > BigInt(maxBytes)) {
+    throw new Error(`Attachment is ${contentLength} bytes; this reader caps downloads at ${maxBytes} bytes.`);
+  }
+
+  if (!resp.body) throw new Error(`GET ${redactUrl(target)} returned no readable attachment body.`);
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      byteLength += value.byteLength;
+      if (byteLength > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(`Attachment exceeds ${maxBytes} bytes; this reader caps downloads at ${maxBytes} bytes.`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
+export async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; image?: string; blob?: string; mime?: string; source: string; warning?: string }> {
   const existing = a.extractedText?.trim();
   if (existing) return { text: existing.slice(0, maxChars), source: 'stored_extractedText' };
 
-  if (a.type === 'image' || a.mime.toLowerCase().startsWith('image/')) {
-    return {
-      source: 'image_url',
-      warning: 'Image attachments are returned as URLs/metadata. Pass the URL to a vision-capable model or browser/image tool to inspect pixels.',
-    };
-  }
-
   const mime = a.mime.toLowerCase();
   const maxBytes = 10 * 1024 * 1024;
+  if (a.type === 'image' || mime.startsWith('image/')) {
+    // The URL may be a protected self-hosted path that a browser or vision
+    // tool cannot open (no origin, no capability), so the reader fetches the
+    // bytes with the room's credentials and hands back the image itself.
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
+    return { source: 'fetched_image', image: Buffer.from(bytes).toString('base64'), mime: a.mime || 'application/octet-stream' };
+  }
+
   if (canReadAsText(a)) {
-    const bytes = await fetchAttachmentBytes(a.url, maxBytes);
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     return { text: Buffer.from(bytes).toString('utf8').trim().slice(0, maxChars), source: 'fetched_text' };
   }
 
   if (mime === 'application/pdf' || /\.pdf$/i.test(a.name)) {
-    const bytes = await fetchAttachmentBytes(a.url, maxBytes);
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     const { extractText } = await import('unpdf');
     const extraction = await extractText(bytes, { mergePages: true });
     const merged = Array.isArray(extraction.text) ? extraction.text.join('\n\n') : String(extraction.text ?? '');
@@ -412,16 +507,18 @@ async function readAttachmentText(a: MessageAttachment, maxChars: number): Promi
   }
 
   if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || /\.docx$/i.test(a.name)) {
-    const bytes = await fetchAttachmentBytes(a.url, maxBytes);
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     const mammoth = await import('mammoth');
     const result = await mammoth.extractRawText({ buffer: Buffer.from(bytes) });
     return { text: String(result.value ?? '').trim().slice(0, maxChars), source: 'fetched_docx' };
   }
 
-  return {
-    source: 'unsupported',
-    warning: `No MCP reader for ${a.mime}. Download/open the URL with a suitable local tool: ${a.url}`,
-  };
+  // Allowed but not text-extractable (zip, xls, ...): the URL may be a protected
+  // self-hosted path the caller cannot open, so hand back the bytes as a blob
+  // through the authenticated reader. Above the cap the size error surfaces as
+  // text (never a raw protected url).
+  const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
+  return { source: 'fetched_blob', blob: Buffer.from(bytes).toString('base64'), mime: a.mime || 'application/octet-stream' };
 }
 
 /** Long-poll for new messages; shared by room_listen and post-join/create first listen. */
@@ -503,7 +600,7 @@ async function runRoomListenPoll(
       );
       const baseHint = `${msgs.length} new message(s). Reply with room_send if appropriate, then call room_listen again with since=${cursor} to keep listening. ${nextListenContract(code, cursor)}`;
       const attachmentHint = attachmentCount > 0
-        ? ` ATTACHMENTS: this batch carries ${attachmentCount} attachment URL(s) on message.attachments[]. To inspect their contents (read a screenshot, parse a PDF, etc.), fetch the .url with your environment's URL/file/vision tool. Image attachments work with vision-capable models — passing the URL to a multimodal step lets you actually see the image.`
+        ? ` ATTACHMENTS: this batch carries ${attachmentCount} attachment(s) on message.attachments[]. Call room_attachment_read with the attachment id, URL, or filename to read it through the room's authenticated path. Image attachments return an MCP image block for vision-capable clients.`
         : '';
       return {
         messages: msgs,
@@ -556,7 +653,7 @@ async function readHostKey(code: string): Promise<string | undefined> {
 }
 
 export function registerTools(server: Server) {
-  const client = createRoomApiClient();
+  const client = createRoomApiClient({ loadCredentials: toolCredentialLoader });
   // Snapshot the host harness once at boot. This drives the persistence-setup
   // nudge in room_join / room_create — agents on harnesses that don't
   // auto-loop tool calls (Cursor without 1.7+ stop hook, Antigravity, etc.)
@@ -888,7 +985,7 @@ export function registerTools(server: Server) {
       // parallel sessions don't share keys.
       const credentials = client.getCredentials(code);
       await setRoom(code, {
-        name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey,
+        name: a.name, client: 'cc', cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey,
         accessToken: created.accessToken ?? credentials.accessToken,
         participantToken: joined.participantToken ?? credentials.participantToken,
       });
@@ -1009,7 +1106,7 @@ export function registerTools(server: Server) {
       const msgs = await listMessages(client, a.code, 0);
       const credentials = client.getCredentials(a.code);
       await setRoom(a.code, {
-        name: finalName, cursor: msgs.length, joinedAt: Date.now(),
+        name: finalName, client: 'cc', cursor: msgs.length, joinedAt: Date.now(),
         accessToken: credentials.accessToken,
         participantToken: updated.participantToken ?? credentials.participantToken,
       });
@@ -1138,13 +1235,13 @@ export function registerTools(server: Server) {
       let attachments: MessageAttachment[] = [];
       if (Array.isArray(a.attachments) && a.attachments.length > 0) {
         try {
-          const roomState = (await readState()).rooms[a.code];
+          const credentials = await toolCredentialLoader(a.code);
           attachments = await uploadAgentAttachments(
             a.attachments as AgentAttachmentInput[],
             a.code,
             {
-              accessToken: roomState?.accessToken,
-              participantToken: roomState?.participantToken,
+              accessToken: credentials?.accessToken,
+              participantToken: credentials?.participantToken,
             },
           );
         } catch (e) {
@@ -1507,15 +1604,9 @@ export function registerTools(server: Server) {
         ? Math.min(Math.max(1000, Math.floor(maxCharsRaw)), 30_000)
         : 12_000;
       try {
-        const read = await readAttachmentText(hit.attachment, maxChars);
-        return ok({
-          ok: true,
-          attachment: hit.attachment,
-          message: hit.message,
-          source: read.source,
-          text: read.text,
-          warning: read.warning,
-        });
+        // Same harness-aware scope as the room client: a PPID-scoped read misses after a Cursor/Codex restart.
+        const read = await readAttachmentText(hit.attachment, maxChars, { accessToken: (await toolCredentialLoader(a.code))?.accessToken });
+        return attachmentReadResult(hit.attachment, hit.message, read);
       } catch (e) {
         return ok({
           ok: false,

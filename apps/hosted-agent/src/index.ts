@@ -2,7 +2,7 @@ import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { createLocalServer } from '@agent-room/local-server';
 import type { Message } from '@agent-room/shared';
-import { buildBootstrapOffer, HOSTED_IDENTITY, makeMessage } from './agent.js';
+import { buildBootstrapOffer, HOSTED_IDENTITY, initializeHostedState, makeMessage } from './agent.js';
 import { pollOnce } from './loop.js';
 
 /**
@@ -37,14 +37,12 @@ async function main(): Promise<void> {
   process.stdout.write(`hosted room server listening on ${bound.host}:${bound.port}\n`);
 
   const offer = buildBootstrapOffer(repository, revision, await readFile(artifactPath));
-  let state = await loadState();
-  if (!state) {
+  const initialized = await initializeHostedState(await loadState(), async (): Promise<HostedState> => {
     const created = await post(local, { action: 'create', topic: 'Railway live room test', createdBy: 'Railway Host' }, {});
-    state = { code: String(created.room.code), accessToken: String(created.accessToken), cursor: 0 };
-    await saveState(state);
-    // Test-only credentials, printed once so the operator can hand them to the starter.
-    process.stdout.write(`ROOM_CODE=${state.code}\nROOM_ACCESS_TOKEN=${state.accessToken}\n`);
-  }
+    return { code: String(created.room.code), accessToken: String(created.accessToken), cursor: 0 };
+  }, saveState, statePath, process.env);
+  let state = initialized.state;
+  for (const line of initialized.announcement) process.stdout.write(`${line}\n`);
   if (!state.participantToken) {
     const joined = await post(local, { action: 'join', code: state.code, participant: { ...HOSTED_IDENTITY, joinedAt: 0, lastSeenAt: 0 } }, { access: state.accessToken });
     state.participantToken = String(joined.participantToken);

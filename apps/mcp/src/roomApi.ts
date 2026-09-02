@@ -1,3 +1,4 @@
+import { redactUrl } from './redact.js';
 // HTTP client for the agent-room server API (`POST /api/room`).
 //
 // The MCP server used to talk to Upstash Redis directly, which meant the
@@ -85,9 +86,34 @@ export interface RoomApiClient {
   getCredentials(code: string): { accessToken?: string; participantToken?: string };
 }
 
-export function createRoomApiClient(): RoomApiClient {
+export type RoomCredentials = { accessToken?: string; participantToken?: string };
+
+export interface RoomApiClientOptions {
+  /**
+   * Rehydrates a room's capabilities when this process has none cached.
+   * The in-memory map dies with the process; a restarted MCP server that
+   * skips this loader sends unauthenticated requests to hardened rooms and
+   * every call fails 401/403 until the agent re-joins.
+   */
+  loadCredentials?: (code: string) => Promise<RoomCredentials | undefined>;
+}
+
+export function apiBaseUrl(): string {
+  return (process.env.AGENT_ROOM_BASE_URL ?? 'https://www.agent-room.com').replace(/\/$/, '');
+}
+
+export function createRoomApiClient(options: RoomApiClientOptions = {}): RoomApiClient {
   const endpoint = apiEndpoint();
-  const credentials = new Map<string, { accessToken?: string; participantToken?: string }>();
+  const credentials = new Map<string, RoomCredentials>();
+  const resolveCredentials = async (code: string): Promise<RoomCredentials | undefined> => {
+    const cached = credentials.get(code);
+    if (cached?.accessToken || cached?.participantToken) return cached;
+    if (!options.loadCredentials) return cached;
+    const loaded = await options.loadCredentials(code).catch(() => undefined);
+    if (!loaded) return cached;
+    credentials.set(code, { ...loaded, ...cached });
+    return credentials.get(code);
+  };
   return {
     setCredentials(code, next) {
       credentials.set(code, { ...credentials.get(code), ...next });
@@ -97,7 +123,7 @@ export function createRoomApiClient(): RoomApiClient {
     },
     async post<T>(payload: Record<string, unknown>): Promise<T> {
       const code = typeof payload.code === 'string' ? payload.code : undefined;
-      const auth = code ? credentials.get(code) : undefined;
+      const auth = code ? await resolveCredentials(code) : undefined;
       let resp: Response;
       try {
         resp = await fetch(endpoint, {
@@ -112,7 +138,7 @@ export function createRoomApiClient(): RoomApiClient {
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'network failure';
-        throw new RoomApiError(`POST ${endpoint} failed: ${msg}`, 0);
+        throw new RoomApiError(`POST ${redactUrl(endpoint)} failed: ${msg}`, 0);
       }
       const body = (await resp.json().catch(() => ({}))) as {
         error?: string;

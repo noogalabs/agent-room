@@ -1,7 +1,8 @@
 # MCP publish source
 
-The npm package `agent-room-mcp` is published only from the standalone
-repository [`agent-room-alkl/agent-room-mcp`](https://github.com/agent-room-alkl/agent-room-mcp).
+This fork (noogalabs/agent-room) does not publish the `agent-room-mcp` npm
+package. The published package comes from the original project's standalone
+publishing repository, which this fork does not track or contribute to.
 
 This repository keeps `apps/mcp` for source parity and developer reference,
 but the workspace package is intentionally marked `private: true` so an

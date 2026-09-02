@@ -26,6 +26,8 @@ function currentHarnessStateFile(): string | null {
 
 export interface RoomState {
   name: string;
+  /** Participant client is part of the immutable room identity tuple. */
+  client?: 'cc';
   cursor: number;
   joinedAt: number;
   lastSentAt?: number;
@@ -124,6 +126,40 @@ export async function readMergedState(): Promise<AgentRoomState> {
   const files = await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
   return mergeStates(states);
+}
+
+function sameParticipant(a: RoomState, b: RoomState): boolean {
+  return a.name === b.name && (a.client ?? 'cc') === (b.client ?? 'cc');
+}
+
+/** Resolve capabilities without crossing participant identities. */
+export async function readRoomStateForCredentials(code: string): Promise<RoomState | undefined> {
+  const current = (await readStateFile(STATE_FILE)).rooms[code];
+  const harnessFile = currentHarnessStateFile();
+  const harness = harnessFile ? (await readStateFile(harnessFile)).rooms[code] : undefined;
+  const files = await listStateFiles();
+  const states = await Promise.all(files.map(readStateFile));
+  const candidates = states
+    .map((state) => state.rooms[code])
+    .filter((room): room is RoomState => Boolean(room));
+  const knownIdentities = new Set(candidates.map((room) => `${room.name}\0${room.client ?? 'cc'}`));
+  const identity = current ?? harness ?? (knownIdentities.size === 1 ? candidates[0] : undefined);
+  if (!identity) return undefined;
+
+  const matches = states
+    .map((state) => state.rooms[code])
+    .filter((room): room is RoomState => Boolean(room && sameParticipant(room, identity)))
+    .sort((a, b) => b.joinedAt - a.joinedAt);
+  const sources = [current, harness, ...matches].filter(
+    (room): room is RoomState => Boolean(room && sameParticipant(room, identity)),
+  );
+  const preferred = sources[0];
+  if (!preferred) return undefined;
+  return {
+    ...preferred,
+    accessToken: sources.find((room) => room.accessToken)?.accessToken,
+    participantToken: sources.find((room) => room.participantToken)?.participantToken,
+  };
 }
 
 export async function readRoomStateForJoin(code: string, desiredName: string): Promise<RoomState | undefined> {

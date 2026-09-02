@@ -58,21 +58,40 @@ function participantToken(req: IncomingMessage): string {
   return header.slice(7);
 }
 
-function authorizeAccess(record: DurableRoom, req: IncomingMessage): void {
-  if (hashSecret(accessToken(req)) !== record.accessHash) throw new HttpError(403, 'room_access_denied', 'Invalid room access token.');
+type RoomDb = { rooms: Record<string, DurableRoom> };
+
+function headerAccess(req: IncomingMessage): string | null {
+  const token = req.headers['x-agent-room-access'];
+  return typeof token === 'string' && token !== '' ? token : null;
 }
 
-function authorizeParticipant(record: DurableRoom, req: IncomingMessage): Participant {
-  authorizeAccess(record, req);
+/**
+ * Open a room by code AND capability, credential first. A missing token is
+ * refused 401 and a wrong one 403 before the code is ever looked up, and a
+ * fabricated code gets the same status and body as a real one, so an
+ * unauthenticated caller cannot use the response to learn which room codes
+ * exist. Only an authenticated caller can observe "not found" (never, in
+ * practice: a valid token exists only for a room that exists).
+ */
+function openRoom(db: RoomDb, code: unknown, suppliedAccess: string | null): DurableRoom {
+  if (!suppliedAccess) throw new HttpError(401, 'room_access_required', 'Room access token required.');
+  const record = typeof code === 'string' ? db.rooms[code] : undefined;
+  if (!record || hashSecret(suppliedAccess) !== record.accessHash) {
+    throw new HttpError(403, 'room_access_denied', 'Invalid room access token.');
+  }
+  return record;
+}
+
+function openRoomForRequest(db: RoomDb, code: unknown, req: IncomingMessage): DurableRoom {
+  return openRoom(db, code, headerAccess(req));
+}
+
+function authorizeParticipant(db: RoomDb, code: unknown, req: IncomingMessage): { record: DurableRoom; participant: Participant } {
+  const record = openRoomForRequest(db, code, req);
   const hash = hashSecret(participantToken(req));
   const identity = Object.values(record.participants).find((candidate) => candidate.tokenHash === hash);
   if (!identity) throw new HttpError(403, 'participant_auth_denied', 'Invalid participant token.');
-  return identity.participant;
-}
-
-function findRoom(db: { rooms: Record<string, DurableRoom> }, code: unknown): DurableRoom {
-  if (typeof code !== 'string' || !db.rooms[code]) throw new HttpError(404, 'RoomNotFoundError', `Room not found: ${String(code)}`);
-  return db.rooms[code];
+  return { record, participant: identity.participant };
 }
 
 export function createLocalServer(options: LocalServerOptions) {
@@ -89,13 +108,7 @@ export function createLocalServer(options: LocalServerOptions) {
       const url = new URL(req.url ?? '/', `http://${host}`);
       if (req.method === 'GET' && url.pathname.startsWith('/watch/')) {
         const code = url.pathname.slice('/watch/'.length);
-        const suppliedAccess = url.searchParams.get('access') ?? '';
-        await store.read((db) => {
-          const record = findRoom(db, code);
-          if (hashSecret(suppliedAccess) !== record.accessHash) {
-            throw new HttpError(403, 'room_access_denied', 'Invalid watch access token.');
-          }
-        });
+        await store.read((db) => { openRoom(db, code, url.searchParams.get('access')); });
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'private, no-store',
@@ -107,12 +120,8 @@ export function createLocalServer(options: LocalServerOptions) {
       }
       if (req.method === 'GET' && url.pathname.startsWith('/watch-data/')) {
         const code = url.pathname.slice('/watch-data/'.length);
-        const suppliedAccess = url.searchParams.get('access') ?? '';
         const snapshot = await store.read((db) => {
-          const record = findRoom(db, code);
-          if (hashSecret(suppliedAccess) !== record.accessHash) {
-            throw new HttpError(403, 'room_access_denied', 'Invalid watch access token.');
-          }
+          const record = openRoom(db, code, url.searchParams.get('access'));
           return {
             room: {
               code: record.room.code,
@@ -130,11 +139,10 @@ export function createLocalServer(options: LocalServerOptions) {
       if (req.method === 'GET' && url.pathname.startsWith('/attachments/')) {
         const file = basename(url.pathname);
         const code = file.slice(0, 11);
-        const suppliedAccess = url.searchParams.get('access') ?? '';
-        await store.read((db) => {
-          const record = findRoom(db, code);
-          if (hashSecret(suppliedAccess) !== record.accessHash) throw new HttpError(403, 'room_access_denied', 'Invalid attachment access token.');
-        });
+        // Header first (the persisted URL no longer carries the token); the
+        // legacy ?access= form is still honored for URLs persisted before that.
+        // Header first (the persisted URL carries no token); legacy ?access= still honored.
+        await store.read((db) => { openRoom(db, code, headerAccess(req) ?? url.searchParams.get('access')); });
         const bytes = await readFile(join(attachmentsDir, file));
         res.writeHead(200, { 'content-type': 'application/octet-stream', 'cache-control': 'private, no-store' });
         res.end(bytes);
@@ -149,7 +157,7 @@ export function createLocalServer(options: LocalServerOptions) {
         });
         const form = await request.formData();
         const code = String(form.get('roomCode') ?? '');
-        await store.read((db) => authorizeParticipant(findRoom(db, code), req));
+        await store.read((db) => authorizeParticipant(db, code, req));
         const file = form.get('file');
         if (!(file instanceof File)) throw new HttpError(400, 'missing_file', 'Multipart file field required.');
         if (file.size > 10 * 1024 * 1024) throw new HttpError(413, 'file_too_large', 'Attachment exceeds 10 MiB.');
@@ -159,7 +167,8 @@ export function createLocalServer(options: LocalServerOptions) {
         await writeFile(join(attachmentsDir, storedName), Buffer.from(await file.arrayBuffer()), { mode: 0o600 });
         const attachment: MessageAttachment = {
           id, type: file.type.startsWith('image/') ? 'image' : 'file',
-          url: `/attachments/${storedName}?access=${encodeURIComponent(accessToken(req))}`,
+          // No capability in the persisted URL: readers send x-agent-room-access.
+          url: `/attachments/${storedName}`,
           storageKey: storedName, name: file.name,
           size: file.size, mime: file.type || 'application/octet-stream', uploadedAt: Date.now(),
         };
@@ -232,8 +241,7 @@ async function dispatch(store: DurableStore, req: IncomingMessage, input: Record
 
   if (input.action === 'join') {
     return store.transaction((db) => {
-      const record = findRoom(db, input.code);
-      authorizeAccess(record, req);
+      const record = openRoomForRequest(db, input.code, req);
       const requested = input.participant as Participant;
       if (!requested?.name) throw new HttpError(400, 'bad_participant', 'Participant name required.');
       if (requested.name === record.room.createdBy && hashSecret(String(input.hostKey ?? '')) !== record.room.hostKeyHash) {
@@ -262,8 +270,7 @@ async function dispatch(store: DurableStore, req: IncomingMessage, input: Record
 
   if (input.action === 'get' || input.action === 'messages' || input.action === 'taskBoard') {
     return store.read((db) => {
-      const record = findRoom(db, input.code);
-      authorizeAccess(record, req);
+      const record = openRoomForRequest(db, input.code, req);
       if (input.action === 'get') return { room: record.room };
       if (input.action === 'messages') return { messages: record.messages.slice(Number(input.cursor ?? 0)) };
       return { board: record.board };
@@ -272,8 +279,7 @@ async function dispatch(store: DurableStore, req: IncomingMessage, input: Record
 
   if (input.action === 'send') {
     return store.transaction((db) => {
-      const record = findRoom(db, input.code);
-      const identity = authorizeParticipant(record, req);
+      const { record, participant: identity } = authorizeParticipant(db, input.code, req);
       const supplied = input.message as Message;
       if (supplied.name !== identity.name || supplied.client !== identity.client) throw new HttpError(403, 'identity_mismatch', 'Message identity does not match authenticated participant.');
       record.messages.push(supplied);
@@ -283,8 +289,7 @@ async function dispatch(store: DurableStore, req: IncomingMessage, input: Record
 
   if (input.action === 'presence') {
     return store.transaction((db) => {
-      const record = findRoom(db, input.code);
-      const identity = authorizeParticipant(record, req);
+      const { record, participant: identity } = authorizeParticipant(db, input.code, req);
       if (input.name !== identity.name) throw new HttpError(403, 'identity_mismatch', 'Presence identity mismatch.');
       identity.lastSeenAt = Date.now();
       identity.listenUntil = Number(input.until);
@@ -294,8 +299,7 @@ async function dispatch(store: DurableStore, req: IncomingMessage, input: Record
 
   if (input.action === 'taskCreate' || input.action === 'taskClaim' || input.action === 'taskSubmit') {
     return store.transaction((db) => {
-      const record = findRoom(db, input.code);
-      const identity = authorizeParticipant(record, req);
+      const { record, participant: identity } = authorizeParticipant(db, input.code, req);
       if (String(input.requesterName ?? input.name) !== identity.name) throw new HttpError(403, 'identity_mismatch', 'Task identity mismatch.');
       let task: Task;
       if (input.action === 'taskCreate') {
