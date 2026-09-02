@@ -205,12 +205,15 @@ describe('local Pilot-1 server', () => {
     const page = await response.text();
     const view = new URL(`${base}${created.watchPath}`).searchParams.get('view')!;
     expect(page).toContain(view);
+    const snapshotUrl = `${base}/watch-data/${created.room.code}?view=${encodeURIComponent(view)}`;
+    expect((await fetch(snapshotUrl)).status).toBe(200);
 
     const expiry = Number(view.split('.')[0]);
     vi.spyOn(Date, 'now').mockReturnValue(expiry + 1);
     const expired = await fetch(original, { redirect: 'manual' });
     expect(expired.status).toBe(403);
     expect(expired.headers.get('location')).toBeNull();
+    expect((await fetch(snapshotUrl)).status).toBe(403);
   });
 
   it('refuses a non-loopback bind', () => {

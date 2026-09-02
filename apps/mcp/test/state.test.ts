@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { mergeStates, type AgentRoomState } from '../src/state.js';
 
 async function makeStateDir(prefix: string) {
@@ -12,6 +14,20 @@ async function makeStateDir(prefix: string) {
 function harnessFile(dir: string, kind: string, sessionId: string) {
   const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
   return join(dir, `state-harness-${kind}-${scope}.json`);
+}
+
+async function invokeRoomEnd(code: string) {
+  const handlers = new Map<unknown, (request: any) => Promise<any>>();
+  const server = {
+    setRequestHandler(schema: unknown, handler: (request: any) => Promise<any>) {
+      handlers.set(schema, handler);
+    },
+  } as unknown as Server;
+  const { registerTools } = await import('../src/tools.js');
+  registerTools(server);
+  return handlers.get(CallToolRequestSchema)!({
+    params: { name: 'room_end', arguments: { code } },
+  });
 }
 
 afterEach(() => {
@@ -269,6 +285,76 @@ describe('state harness files', () => {
     expect(await stateModule.readRoomStateForSession(code)).toMatchObject({
       name: 'Run A Host', hostKey: 'run-a-host-key',
     });
+  });
+
+  it('production room_end never uses a foreign Codex run host identity', async () => {
+    const dir = await makeStateDir('agent-room-tool-codex-run-scope-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('AGENT_ROOM_BASE_URL', 'https://room.example');
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_RUN_ID', 'run-b');
+    const code = 'ABC-DEF-GHJ';
+    await fs.writeFile(harnessFile(dir, 'codex', 'run-a'), JSON.stringify({
+      version: 1, rooms: { [code]: {
+        name: 'Run A Host', client: 'cc', cursor: 2, joinedAt: 10,
+        hostKey: 'run-a-host-key', accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43),
+      } },
+    }));
+    const calls: Array<{ headers: Record<string, string>; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({
+        headers: { ...(init.headers as Record<string, string>) },
+        body: JSON.parse(String(init.body)),
+      });
+      return new Response(JSON.stringify({ error: 'NotHostError', message: 'not host' }), {
+        status: 403, headers: { 'content-type': 'application/json' },
+      });
+    }));
+
+    vi.resetModules();
+    const response = await invokeRoomEnd(code);
+
+    expect(JSON.parse(response.content[0].text)).toMatchObject({ ok: false, error: 'not_host' });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.body).toMatchObject({ action: 'end', code, requesterName: '' });
+    expect(calls[0]!.body).not.toHaveProperty('hostKey');
+    expect(calls[0]!.headers).not.toHaveProperty('x-agent-room-access');
+    expect(calls[0]!.headers).not.toHaveProperty('authorization');
+  });
+
+  it.each([
+    { label: 'same Codex run after restart', codexRun: 'run-a', claude: '', file: (dir: string) => harnessFile(dir, 'codex', 'run-a') },
+    { label: 'ordinary local session', codexRun: '', claude: '1', file: (dir: string) => join(dir, `state-${process.ppid}.json`) },
+  ])('production room_end recovers host identity for $label', async ({ codexRun, claude, file }) => {
+    const dir = await makeStateDir('agent-room-tool-legitimate-host-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('AGENT_ROOM_BASE_URL', 'https://room.example');
+    vi.stubEnv('CODEX_RUN_ID', codexRun);
+    vi.stubEnv('CLAUDECODE', claude);
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    const code = 'ABC-DEF-GHJ';
+    await fs.writeFile(file(dir), JSON.stringify({
+      version: 1, rooms: { [code]: {
+        name: 'Current Host', client: 'cc', cursor: 2, joinedAt: 10,
+        hostKey: 'current-host-key', accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43),
+      } },
+    }));
+    const calls: Array<{ headers: Record<string, string>; body: Record<string, unknown> }> = [];
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      calls.push({ headers: { ...(init.headers as Record<string, string>) }, body: JSON.parse(String(init.body)) });
+      return new Response(JSON.stringify({ room: { code, status: 'ended' } }), {
+        status: 200, headers: { 'content-type': 'application/json' },
+      });
+    }));
+
+    vi.resetModules();
+    const response = await invokeRoomEnd(code);
+
+    expect(JSON.parse(response.content[0].text)).toMatchObject({ ended: true, code });
+    expect(calls[0]!.body).toMatchObject({ action: 'end', code, requesterName: 'Current Host', hostKey: 'current-host-key' });
+    expect(calls[0]!.headers['x-agent-room-access']).toBe('a'.repeat(43));
+    expect(calls[0]!.headers.authorization).toBe(`Bearer ${'p'.repeat(43)}`);
   });
 });
 
