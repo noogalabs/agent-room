@@ -92,11 +92,21 @@ async function connect(configuration: StarterConfiguration): Promise<StarterSess
   ).join(configuration.identity);
 }
 
-async function promptForApproval(offer: BootstrapOffer): Promise<boolean> {
-  const reader = createInterface({ input: stdin, output: stdout });
+export interface ApprovalPrompt {
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
+  timeoutMs?: number;
+}
+
+export async function promptForApproval(offer: BootstrapOffer, prompt: ApprovalPrompt = {}): Promise<boolean> {
+  const output = prompt.output ?? stdout;
+  const reader = createInterface({ input: prompt.input ?? stdin, output });
   try {
-    stdout.write(`Verified bootstrap ${offer.revision} (${offer.artifactSha256}). Run locally? [y/N] `);
-    return requestLocalApproval({ readLine: () => reader.question(''), timeoutMs: 60_000 });
+    output.write(`Verified bootstrap ${offer.revision} (${offer.artifactSha256}). Run locally? [y/N] `);
+    // The await is load-bearing: returning the pending promise would run the
+    // finally block first, close the reader before any answer arrives, and
+    // turn every interactive approval into a timeout decline.
+    return await requestLocalApproval({ readLine: () => reader.question(''), timeoutMs: prompt.timeoutMs ?? 60_000 });
   } finally {
     reader.close();
   }

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { readStarterConfiguration, runStarterOnce, type StarterConfiguration } from './cli.js';
+import { PassThrough } from 'node:stream';
+import { readStarterConfiguration, runStarterOnce, type StarterConfiguration, promptForApproval } from './cli.js';
 import { StarterTransportError } from './transport.js';
 import type { BootstrapOffer, StarterReceipt } from './contracts.js';
 import { STARTER_REPOSITORY } from './offer.js';
@@ -91,5 +92,25 @@ describe('starter entrypoint', () => {
       expect((error as Error)).not.toHaveProperty('cause');
       return true;
     });
+  });
+});
+
+describe('interactive approval prompt', () => {
+  const offer = { kind: 'bootstrap_offer' as const, repository: 'https://github.com/noogalabs/agent-room.git', revision: 'a'.repeat(40), artifactSha256: 'b'.repeat(64) };
+
+  it('keeps the reader open until the operator answers, then approves on y', async () => {
+    const input = new PassThrough(); const output = new PassThrough(); output.resume();
+    const pending = promptForApproval(offer, { input, output, timeoutMs: 2_000 });
+    setTimeout(() => input.write('y\n'), 150);
+    await expect(pending).resolves.toBe(true);
+  });
+
+  it('declines on n and on silence', async () => {
+    const input = new PassThrough(); const output = new PassThrough(); output.resume();
+    const pending = promptForApproval(offer, { input, output, timeoutMs: 2_000 });
+    setTimeout(() => input.write('n\n'), 150);
+    await expect(pending).resolves.toBe(false);
+    const silent = new PassThrough(); const quiet = new PassThrough(); quiet.resume();
+    await expect(promptForApproval(offer, { input: silent, output: quiet, timeoutMs: 200 })).resolves.toBe(false);
   });
 });
