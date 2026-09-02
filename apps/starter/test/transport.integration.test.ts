@@ -44,7 +44,7 @@ describe('starter room contract', () => {
     await writeFile(join(checkout, 'scripts', 'bootstrap-local.mjs'), source);
     const offer: BootstrapOffer = {
       kind: 'bootstrap_offer',
-      repository: 'https://github.com/agent-room-alkl/agent-room.git',
+      repository: 'https://github.com/noogalabs/agent-room.git',
       revision: 'a'.repeat(40),
       artifactSha256: createHash('sha256').update(source).digest('hex'),
     };

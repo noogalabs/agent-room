@@ -1,6 +1,6 @@
 import type { BootstrapOffer } from './contracts.js';
 
-export const STARTER_REPOSITORY = 'https://github.com/agent-room-alkl/agent-room.git';
+export const STARTER_REPOSITORY = 'https://github.com/noogalabs/agent-room.git';
 
 export type OfferValidation =
   | { accepted: true; offer: BootstrapOffer }

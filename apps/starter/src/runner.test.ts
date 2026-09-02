@@ -14,7 +14,7 @@ async function fixture(source = 'process.exit(0);\n') {
   await writeFile(path, source);
   const offer: BootstrapOffer = {
     kind: 'bootstrap_offer',
-    repository: 'https://github.com/agent-room-alkl/agent-room.git',
+    repository: 'https://github.com/noogalabs/agent-room.git',
     revision: 'a'.repeat(40),
     artifactSha256: createHash('sha256').update(source).digest('hex'),
   };

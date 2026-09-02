@@ -164,5 +164,29 @@ describe('local Pilot-1 server', () => {
 
   it('refuses a non-loopback bind', () => {
     expect(() => createLocalServer({ dataDir: '/tmp/nope', host: '0.0.0.0' })).toThrow(/non-loopback/);
+    expect(() => createLocalServer({ dataDir: '/tmp/nope', host: '0.0.0.0', hostedBind: false })).toThrow(/non-loopback/);
+  });
+
+  it('accepts a non-loopback bind only under the explicit hosted opt-in', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'agent-room-hosted-'));
+    const app = createLocalServer({ dataDir, host: '0.0.0.0', hostedBind: true });
+    const bound = await app.listen();
+    try {
+      expect(bound.host).toBe('0.0.0.0');
+      const created = await fetch(`http://127.0.0.1:${bound.port}/api/room`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'create', topic: 'hosted', createdBy: 'Host' }),
+      });
+      expect(created.ok).toBe(true);
+      const denied = await fetch(`http://127.0.0.1:${bound.port}/api/room`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'get', code: (await created.json()).room.code }),
+      });
+      expect(denied.status).toBe(401);
+    } finally {
+      await app.close();
+    }
   });
 });

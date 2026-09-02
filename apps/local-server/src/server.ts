@@ -9,6 +9,13 @@ export interface LocalServerOptions {
   dataDir: string;
   host?: string;
   port?: number;
+  /**
+   * Hosted deployments (a TLS-terminating platform such as Railway) must opt in
+   * explicitly to a non-loopback bind. Default off: the pilot-1 loopback
+   * contract holds unless the operator sets this, and room access stays
+   * token-gated either way.
+   */
+  hostedBind?: boolean;
 }
 
 class HttpError extends Error {
@@ -70,7 +77,8 @@ function findRoom(db: { rooms: Record<string, DurableRoom> }, code: unknown): Du
 
 export function createLocalServer(options: LocalServerOptions) {
   const host = options.host ?? '127.0.0.1';
-  if (host !== '127.0.0.1' && host !== '::1' && host !== 'localhost') {
+  const loopback = host === '127.0.0.1' || host === '::1' || host === 'localhost';
+  if (!loopback && options.hostedBind !== true) {
     throw new Error('Local Agent Room refuses non-loopback bind addresses.');
   }
   const store = new DurableStore(options.dataDir);

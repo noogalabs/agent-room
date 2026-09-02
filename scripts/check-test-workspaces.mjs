@@ -3,6 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const EXPECTED_WORKSPACES = [
+  'apps/hosted-agent',
   'apps/local-server',
   'apps/mcp',
   'apps/starter',
