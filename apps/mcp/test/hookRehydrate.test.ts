@@ -2,11 +2,15 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+beforeEach(() => {
+  process.env.CODEX_THREAD_ID = '';
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.AGENT_ROOM_STATE_FILE;
+  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.CODEX_THREAD_ID; delete process.env.AGENT_ROOM_STATE_FILE;
 });
 
 function harnessFile(dir: string, sessionId = 'run-1') {
@@ -21,6 +25,7 @@ describe('hook credential rehydration across process scopes', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-room-hook-'));
     process.env.AGENT_ROOM_STATE_DIR = dir;
     process.env.CODEX_RUN_ID = 'run-1';
+    process.env.CODEX_THREAD_ID = '';
     delete process.env.AGENT_ROOM_STATE_FILE;
     writeFileSync(harnessFile(dir), JSON.stringify({
       version: 1,

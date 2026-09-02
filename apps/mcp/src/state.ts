@@ -1,5 +1,5 @@
 import { promises as fs } from 'fs';
-import { createHash } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { detectHarness } from './harness.js';
@@ -18,12 +18,24 @@ const STATE_FILE =
   process.env.AGENT_ROOM_STATE_FILE ||
   join(STATE_DIR, `state-${process.ppid ?? process.pid}.json`);
 
+// A detected harness without a stable session identifier must still stay out
+// of merged state. This nonce deliberately lasts only for this MCP process:
+// isolation is safer than guessing that another session's credentials belong
+// to the caller.
+const HARNESS_PROCESS_NONCE = randomUUID();
+
+function currentHarnessSessionId(kind: 'cursor' | 'codex'): string {
+  if (kind === 'codex') {
+    return process.env.CODEX_THREAD_ID || process.env.CODEX_RUN_ID || HARNESS_PROCESS_NONCE;
+  }
+  return process.env.CURSOR_TRACE_ID || process.env.CURSOR_AGENT || HARNESS_PROCESS_NONCE;
+}
+
 function currentHarnessStateFile(): string | null {
   if (process.env.AGENT_ROOM_STATE_FILE) return null;
   const kind = detectHarness().kind;
   if (kind !== 'cursor' && kind !== 'codex') return null;
-  const sessionId = kind === 'codex' ? process.env.CODEX_RUN_ID : process.env.CURSOR_TRACE_ID;
-  if (!sessionId) return null;
+  const sessionId = currentHarnessSessionId(kind);
   const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
   return join(STATE_DIR, `state-harness-${kind}-${scope}.json`);
 }

@@ -108,6 +108,7 @@ describe('state harness files', () => {
     // clear them so the tests pass when the suite runs inside Claude Code.
     vi.stubEnv('CLAUDECODE', '');
     vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    vi.stubEnv('CODEX_THREAD_ID', '');
   });
 
   it('writes stable Codex harness state alongside the PPID-scoped state', async () => {
@@ -131,6 +132,79 @@ describe('state harness files', () => {
       name: 'Codex',
       cursor: 2,
     });
+  });
+
+  it('recovers Codex state by thread id and isolates a foreign thread', async () => {
+    const dir = await makeStateDir('agent-room-state-codex-thread-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_HOME', '/synthetic/codex-home');
+    vi.stubEnv('CODEX_THREAD_ID', 'thread-a');
+    vi.stubEnv('CODEX_RUN_ID', '');
+
+    let stateModule = await import('../src/state.js');
+    await stateModule.setRoom('ABC-DEF-GHJ', {
+      name: 'Thread A Host', cursor: 4, joinedAt: 123, hostKey: 'thread-a-host-key',
+    });
+    expect(await fs.readFile(harnessFile(dir, 'codex', 'thread-a'), 'utf8')).toContain('thread-a-host-key');
+
+    vi.resetModules();
+    stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toMatchObject({
+      name: 'Thread A Host', hostKey: 'thread-a-host-key',
+    });
+
+    await fs.rm(join(dir, `state-${process.ppid}.json`));
+    vi.stubEnv('CODEX_THREAD_ID', 'thread-b');
+    vi.resetModules();
+    stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toBeUndefined();
+  });
+
+  it('recovers Cursor state by its agent id and isolates a foreign agent', async () => {
+    const dir = await makeStateDir('agent-room-state-cursor-agent-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_HOME', '');
+    vi.stubEnv('CODEX_RUN_ID', '');
+    vi.stubEnv('CURSOR_TRACE_ID', '');
+    vi.stubEnv('CURSOR_AGENT', 'cursor-session-a');
+
+    let stateModule = await import('../src/state.js');
+    await stateModule.setRoom('ABC-DEF-GHJ', {
+      name: 'Cursor A Host', cursor: 5, joinedAt: 234, hostKey: 'cursor-a-host-key',
+    });
+    expect(await fs.readFile(harnessFile(dir, 'cursor', 'cursor-session-a'), 'utf8')).toContain('cursor-a-host-key');
+
+    vi.resetModules();
+    stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toMatchObject({
+      name: 'Cursor A Host', hostKey: 'cursor-a-host-key',
+    });
+
+    await fs.rm(join(dir, `state-${process.ppid}.json`));
+    vi.stubEnv('CURSOR_AGENT', 'cursor-session-b');
+    vi.resetModules();
+    stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toBeUndefined();
+  });
+
+  it('never falls back to merged state for a detected harness without an id', async () => {
+    const dir = await makeStateDir('agent-room-state-cursor-nonce-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_HOME', '');
+    vi.stubEnv('CODEX_RUN_ID', '');
+    vi.stubEnv('CURSOR_TRACE_ID', '');
+    vi.stubEnv('CURSOR_AGENT', '');
+    vi.stubEnv('TERM_PROGRAM', 'Cursor');
+    await fs.writeFile(join(dir, 'state-111.json'), JSON.stringify({
+      version: 1, rooms: { 'ABC-DEF-GHJ': {
+        name: 'Foreign Host', cursor: 9, joinedAt: 999, hostKey: 'foreign-host-key',
+      } },
+    }));
+
+    vi.resetModules();
+    const stateModule = await import('../src/state.js');
+    expect((await stateModule.readHarnessStateOrMerged()).rooms).toEqual({});
+    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toBeUndefined();
   });
 
   it('reads Codex harness state when the hook PPID state is empty', async () => {
