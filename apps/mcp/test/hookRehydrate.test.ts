@@ -65,6 +65,27 @@ describe('Stop cleanup keeps live rooms through outages', () => {
     expect(rooms).toEqual(['ABC-DEF-GHJ']);
   });
 
+  it('removes a stale room when both owned capabilities receive 403', async () => {
+    const { rooms } = await arrange(async () => new Response(JSON.stringify({ error: 'room_access_denied', message: 'Room access denied.' }), { status: 403, headers: { 'content-type': 'application/json' } }));
+    expect(rooms).toEqual([]);
+  });
+
+  it('marks retained transport failures so the same Stop skips long polling', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-room-prune-failure-'));
+    process.env.AGENT_ROOM_STATE_DIR = dir;
+    process.env.CODEX_RUN_ID = 'run-1';
+    writeFileSync(join(dir, 'state-harness-codex.json'), JSON.stringify({
+      version: 1,
+      rooms: { 'ABC-DEF-GHJ': { name: 'Me', cursor: 3, joinedAt: 1, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },
+    }));
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('getaddrinfo ENOTFOUND room.example'); }));
+    vi.resetModules();
+    const { pruneRoomsForStop, shouldLongPollAfterPrune } = await import('../src/hook.js');
+    const result = await pruneRoomsForStop('harness');
+    expect(result).toEqual({ activeRooms: [], hadRetainedFailure: true });
+    expect(shouldLongPollAfterPrune(result)).toBe(false);
+  });
+
   it('removes the room only on a definitive not-found answer', async () => {
     const { rooms } = await arrange(async () => new Response(JSON.stringify({ error: 'RoomNotFoundError', message: 'Room not found: ABC-DEF-GHJ' }), { status: 404, headers: { 'content-type': 'application/json' } }));
     expect(rooms).toEqual([]);

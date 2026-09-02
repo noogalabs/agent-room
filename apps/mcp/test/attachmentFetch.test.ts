@@ -41,6 +41,23 @@ describe('room capability never leaves the room origin', () => {
 });
 
 describe('attachment download size boundary', () => {
+  it('drops room credentials when a same-origin attachment redirects cross-origin', async () => {
+    process.env.AGENT_ROOM_BASE_URL = 'https://room.example';
+    const seen: Array<{ url: string; headers: Record<string, string>; redirect?: RequestRedirect }> = [];
+    const fetchFn = vi.fn(async (url: string, init?: RequestInit) => {
+      seen.push({ url, headers: { ...(init?.headers as Record<string, string>) }, redirect: init?.redirect });
+      if (url === 'https://room.example/attachments/x.txt') {
+        return new Response(null, { status: 302, headers: { location: 'https://cdn.example/x.txt' } });
+      }
+      return new Response(new Uint8Array([7]), { status: 200 });
+    }) as unknown as typeof fetch;
+    await fetchAttachmentBytes('/attachments/x.txt', 10, { accessToken: 'a'.repeat(43) }, fetchFn);
+    expect(seen).toEqual([
+      { url: 'https://room.example/attachments/x.txt', headers: { 'x-agent-room-access': 'a'.repeat(43) }, redirect: 'manual' },
+      { url: 'https://cdn.example/x.txt', headers: {}, redirect: 'manual' },
+    ]);
+  });
+
   it('rejects an oversized Content-Length before reading the body', async () => {
     const bodyRead = vi.fn();
     const response = {

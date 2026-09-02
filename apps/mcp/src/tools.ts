@@ -429,8 +429,20 @@ export function attachmentAuthHeaders(target: string, auth: AttachmentFetchAuth,
 }
 
 export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: AttachmentFetchAuth = {}, fetchFn: typeof fetch = fetch): Promise<Uint8Array> {
-  const target = resolveAttachmentUrl(url);
-  const resp = await fetchFn(target, { headers: attachmentAuthHeaders(target, auth) });
+  let target = resolveAttachmentUrl(url);
+  let resp: Response | undefined;
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    resp = await fetchFn(target, {
+      headers: attachmentAuthHeaders(target, auth),
+      redirect: 'manual',
+    });
+    if (![301, 302, 303, 307, 308].includes(resp.status)) break;
+    if (redirects === 5) throw new Error(`GET ${redactUrl(target)} exceeded 5 redirects.`);
+    const location = resp.headers.get('location');
+    if (!location) throw new Error(`GET ${redactUrl(target)} returned ${resp.status} without a Location header.`);
+    target = new URL(location, target).toString();
+  }
+  if (!resp) throw new Error(`GET ${redactUrl(target)} returned no response.`);
   if (!resp.ok) throw new Error(`GET ${redactUrl(target)} returned ${resp.status}.`);
 
   const contentLength = resp.headers.get('content-length')?.trim();

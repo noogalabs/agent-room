@@ -1,4 +1,4 @@
-import { readHarnessStateOrMerged, readState, type AgentRoomState } from './state.js';
+import { readMergedState, readState, type AgentRoomState } from './state.js';
 import { detectHarness } from './harness.js';
 import type { RoomCredentials } from './roomApi.js';
 
@@ -26,6 +26,6 @@ export async function stateCredentialLoader(code: string): Promise<RoomCredentia
  */
 export async function toolCredentialLoader(code: string, env: NodeJS.ProcessEnv = process.env): Promise<RoomCredentials | undefined> {
   const kind = detectHarness(env).kind;
-  const state = kind === 'cursor' || kind === 'codex' ? await readHarnessStateOrMerged() : await readState();
+  const state = kind === 'cursor' || kind === 'codex' ? await readMergedState() : await readState();
   return credentialsFromState(state, code);
 }

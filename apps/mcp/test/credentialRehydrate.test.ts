@@ -5,7 +5,12 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createRoomApiClient } from '../src/roomApi.js';
 
-afterEach(() => { vi.unstubAllGlobals(); delete process.env.AGENT_ROOM_STATE_FILE; });
+afterEach(() => {
+  vi.unstubAllGlobals();
+  delete process.env.AGENT_ROOM_STATE_FILE;
+  delete process.env.AGENT_ROOM_STATE_DIR;
+  delete process.env.CODEX_RUN_ID;
+});
 
 function captureFetch() {
   const calls: Array<{ url: string; headers: Record<string, string> }> = [];
@@ -45,5 +50,21 @@ describe('room credential rehydration after restart', () => {
     }));
     expect(await stateCredentialLoader('ABC-DEF-GHJ')).toEqual({ accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) });
     expect(await stateCredentialLoader('NOP-QRS-TUV')).toBeUndefined();
+  });
+
+  it('finds a room in merged scoped state when the harness snapshot holds another room', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-room-cred-merged-'));
+    delete process.env.AGENT_ROOM_STATE_FILE;
+    process.env.AGENT_ROOM_STATE_DIR = dir;
+    process.env.CODEX_RUN_ID = 'test-run';
+    await writeFile(join(dir, 'state-harness-codex.json'), JSON.stringify({
+      version: 1, rooms: { 'HAR-NES-SON': { name: 'Other', cursor: 0, joinedAt: 2, accessToken: 'h'.repeat(43) } },
+    }));
+    await writeFile(join(dir, 'state-111.json'), JSON.stringify({
+      version: 1, rooms: { 'SCO-PED-ONE': { name: 'Me', cursor: 0, joinedAt: 3, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },
+    }));
+    vi.resetModules();
+    const { toolCredentialLoader } = await import('../src/credentials.js');
+    expect(await toolCredentialLoader('SCO-PED-ONE')).toEqual({ accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) });
   });
 });
