@@ -1,4 +1,4 @@
-import { createRoomApiClient, getRoom, listMessages } from './roomApi.js';
+import { createRoomApiClient, getRoom, listMessages, RoomNotFoundError } from './roomApi.js';
 import { credentialsFromState } from './credentials.js';
 import type { Message } from '@agent-room/shared';
 import {
@@ -94,6 +94,46 @@ type StateScope = 'scoped' | 'harness';
 
 async function readHookState(scope: StateScope) {
   return scope === 'harness' ? readHarnessStateOrMerged() : readState();
+}
+
+export interface ActiveRoom { code: string; topic: string; selfName: string; cursor: number }
+
+/** Only a definitive "this room no longer exists" answer may evict a room from local state. */
+export function shouldDropRoomOnError(error: unknown): boolean {
+  return error instanceof RoomNotFoundError;
+}
+
+/**
+ * Best-effort cleanup at Stop: drop rooms from local state that are gone
+ * server-side (TTL expired), marked ended, or where this agent is no longer
+ * a participant, so a left-over entry cannot keep the Stop hook looping.
+ * Auth failures, DNS failures and timeouts are NOT evidence the room is gone:
+ * a brief room-API outage at Stop must not drop a live room and silence the
+ * agent, so those rows are retained and skipped this cycle.
+ */
+export async function pruneRooms(stateScope: StateScope): Promise<ActiveRoom[]> {
+  const state = await readHookState(stateScope);
+  // Same snapshot rule as fetchPending: cleanup must never evaluate a room with missing capabilities.
+  const apiClient = createRoomApiClient({ loadCredentials: async (code) => credentialsFromState(state, code) });
+  const drop = async (code: string) => {
+    try {
+      if (stateScope === 'harness') await removeRoomEverywhere(code);
+      else await removeRoom(code);
+    } catch { /* non-essential */ }
+  };
+  const activeRooms: ActiveRoom[] = [];
+  for (const [code, r] of Object.entries(state.rooms)) {
+    try {
+      const room = await getRoom(apiClient, code);
+      const stillIn = room.participants.some(p => p.name === r.name && p.client === 'cc');
+      if (room.status !== 'active' || !stillIn) { await drop(code); continue; }
+      activeRooms.push({ code, topic: room.topic, selfName: r.name, cursor: r.cursor });
+    } catch (error) {
+      if (shouldDropRoomOnError(error)) await drop(code);
+      // otherwise: retained, skipped this cycle
+    }
+  }
+  return activeRooms;
 }
 
 export async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
@@ -313,36 +353,9 @@ export async function runHook(): Promise<void> {
   // cap up top (`stop_hook_active && streak >= MAX`), so reaching this
   // branch means we have budget for one more keep-alive nudge.
   if (withMessages.length === 0 && event === 'Stop') {
-    let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
+    let activeRooms: ActiveRoom[] = [];
     try {
-      const state = await readHookState(stateScope);
-      // Same snapshot rule as fetchPending: cleanup must never evaluate a room with missing capabilities.
-      const apiClient = createRoomApiClient({ loadCredentials: async (code) => credentialsFromState(state, code) });
-      // Best-effort cleanup: drop rooms from local state that are gone
-      // server-side (TTL expired) or marked ended, or where this agent is
-      // no longer in the participants list. Without this, a left-over
-      // entry would keep the Stop hook looping "call room_listen" forever
-      // after the meeting closes — Codex caught this in 0.12.0 review.
-      for (const [code, r] of Object.entries(state.rooms)) {
-        try {
-          const room = await getRoom(apiClient, code);
-          const stillIn = room.participants.some(p => p.name === r.name && p.client === 'cc');
-          if (room.status !== 'active' || !stillIn) {
-            try {
-              if (stateScope === 'harness') await removeRoomEverywhere(code);
-              else await removeRoom(code);
-            } catch { /* non-essential */ }
-            continue;
-          }
-          activeRooms.push({ code, topic: room.topic, selfName: r.name, cursor: r.cursor });
-        } catch {
-          // Room not found / TTL expired — drop it from state too.
-          try {
-            if (stateScope === 'harness') await removeRoomEverywhere(code);
-            else await removeRoom(code);
-          } catch { /* non-essential */ }
-        }
-      }
+      activeRooms = await pruneRooms(stateScope);
     } catch { /* fall through to plain exit */ }
 
     if (activeRooms.length > 0) {

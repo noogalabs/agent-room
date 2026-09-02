@@ -1,3 +1,4 @@
+import { redactUrl } from './redact.js';
 // Server-side companion to apps/web/src/lib/upload.ts. Lets MCP agents
 // (Claude Code, Cursor, Codex, etc.) ship binary content into a room
 // via room_send's `attachments` arg without needing to touch R2 / Vercel
@@ -187,7 +188,7 @@ export async function uploadAgentAttachment(
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : 'network failure';
-    throw new AttachmentUploadError('network_error', `POST ${uploadEndpoint()} failed: ${msg}`);
+    throw new AttachmentUploadError('network_error', `POST ${redactUrl(uploadEndpoint())} failed: ${msg}`);
   }
 
   if (!resp.ok) {

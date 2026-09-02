@@ -36,6 +36,7 @@ import {
   apiBaseUrl,
 } from './roomApi.js';
 import { stateCredentialLoader } from './credentials.js';
+import { redactUrl } from './redact.js';
 import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
 import type {
   Message,
@@ -399,7 +400,7 @@ export function attachmentAuthHeaders(target: string, auth: AttachmentFetchAuth,
 export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: AttachmentFetchAuth = {}, fetchFn: typeof fetch = fetch): Promise<Uint8Array> {
   const target = resolveAttachmentUrl(url);
   const resp = await fetchFn(target, { headers: attachmentAuthHeaders(target, auth) });
-  if (!resp.ok) throw new Error(`GET ${target} returned ${resp.status}.`);
+  if (!resp.ok) throw new Error(`GET ${redactUrl(target)} returned ${resp.status}.`);
   const buf = new Uint8Array(await resp.arrayBuffer());
   if (buf.byteLength > maxBytes) {
     throw new Error(`Attachment is ${buf.byteLength} bytes; this reader caps downloads at ${maxBytes} bytes.`);
@@ -443,7 +444,7 @@ export async function readAttachmentText(a: MessageAttachment, maxChars: number,
 
   return {
     source: 'unsupported',
-    warning: `No MCP reader for ${a.mime}. Download/open the URL with a suitable local tool: ${a.url}`,
+    warning: `No MCP reader for ${a.mime}. Download/open the URL with a suitable local tool: ${redactUrl(a.url)}`,
   };
 }
 

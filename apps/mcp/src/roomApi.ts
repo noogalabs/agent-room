@@ -1,3 +1,4 @@
+import { redactUrl } from './redact.js';
 // HTTP client for the agent-room server API (`POST /api/room`).
 //
 // The MCP server used to talk to Upstash Redis directly, which meant the
@@ -137,7 +138,7 @@ export function createRoomApiClient(options: RoomApiClientOptions = {}): RoomApi
         });
       } catch (e) {
         const msg = e instanceof Error ? e.message : 'network failure';
-        throw new RoomApiError(`POST ${endpoint} failed: ${msg}`, 0);
+        throw new RoomApiError(`POST ${redactUrl(endpoint)} failed: ${msg}`, 0);
       }
       const body = (await resp.json().catch(() => ({}))) as {
         error?: string;
