@@ -1,4 +1,5 @@
 import { mkdtempSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -19,6 +20,11 @@ function captureFetch() {
     return new Response(JSON.stringify({ result: { cursor: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
   }));
   return calls;
+}
+
+function harnessFile(dir: string, sessionId: string) {
+  const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+  return join(dir, `state-harness-codex-${scope}.json`);
 }
 
 describe('room credential rehydration after restart', () => {
@@ -52,12 +58,12 @@ describe('room credential rehydration after restart', () => {
     expect(await stateCredentialLoader('NOP-QRS-TUV')).toBeUndefined();
   });
 
-  it('finds a room in merged scoped state when the harness snapshot holds another room', async () => {
+  it('does not recover a room from a foreign scoped state', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-room-cred-merged-'));
     delete process.env.AGENT_ROOM_STATE_FILE;
     process.env.AGENT_ROOM_STATE_DIR = dir;
     process.env.CODEX_RUN_ID = 'test-run';
-    await writeFile(join(dir, 'state-harness-codex.json'), JSON.stringify({
+    await writeFile(harnessFile(dir, 'test-run'), JSON.stringify({
       version: 1, rooms: { 'HAR-NES-SON': { name: 'Other', cursor: 0, joinedAt: 2, accessToken: 'h'.repeat(43) } },
     }));
     await writeFile(join(dir, 'state-111.json'), JSON.stringify({
@@ -65,7 +71,7 @@ describe('room credential rehydration after restart', () => {
     }));
     vi.resetModules();
     const { toolCredentialLoader } = await import('../src/credentials.js');
-    expect(await toolCredentialLoader('SCO-PED-ONE')).toEqual({ accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) });
+    expect(await toolCredentialLoader('SCO-PED-ONE')).toBeUndefined();
   });
 
   it('keeps the current participant token when a newer foreign participant shares the room', async () => {

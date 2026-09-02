@@ -145,7 +145,10 @@ export function createLocalServer(options: LocalServerOptions) {
       if (req.method === 'GET' && url.pathname.startsWith('/watch/')) {
         const code = url.pathname.slice('/watch/'.length);
         const record = await store.read((db) => openRoomForWatch(db, code, req, url));
-        if (url.searchParams.has('access')) {
+        // Rotate only a non-empty legacy query capability that authenticated
+        // this request. A view-only caller must not renew its own expiry by
+        // appending an empty access parameter.
+        if (!headerAccess(req) && url.searchParams.get('access')) {
           res.writeHead(302, {
             location: `/watch/${encodeURIComponent(code)}?view=${encodeURIComponent(watchToken(record))}`,
             'cache-control': 'private, no-store',

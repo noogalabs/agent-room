@@ -1,4 +1,5 @@
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -8,15 +9,20 @@ afterEach(() => {
   delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.AGENT_ROOM_STATE_FILE;
 });
 
+function harnessFile(dir: string, sessionId = 'run-1') {
+  const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+  return join(dir, `state-harness-codex-${scope}.json`);
+}
+
 describe('hook credential rehydration across process scopes', () => {
   it('a room known only to the harness-scoped state file is listed with both capabilities from that same snapshot', async () => {
-    // Codex harness: the hook reads state-harness-codex.json; this hook process's
+    // Codex harness: the hook reads its run-scoped harness file; this hook process's
     // own PPID-scoped file does not exist, so a PPID-scoped loader would miss.
     const dir = mkdtempSync(join(tmpdir(), 'agent-room-hook-'));
     process.env.AGENT_ROOM_STATE_DIR = dir;
     process.env.CODEX_RUN_ID = 'run-1';
     delete process.env.AGENT_ROOM_STATE_FILE;
-    writeFileSync(join(dir, 'state-harness-codex.json'), JSON.stringify({
+    writeFileSync(harnessFile(dir), JSON.stringify({
       version: 1,
       rooms: { 'ABC-DEF-GHJ': { name: 'Me', cursor: 0, joinedAt: 1, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },
     }));
@@ -41,7 +47,7 @@ describe('Stop cleanup keeps live rooms through outages', () => {
     process.env.AGENT_ROOM_STATE_DIR = dir;
     process.env.CODEX_RUN_ID = 'run-1';
     delete process.env.AGENT_ROOM_STATE_FILE;
-    const file = join(dir, 'state-harness-codex.json');
+    const file = harnessFile(dir);
     writeFileSync(file, JSON.stringify({
       version: 1,
       rooms: { 'ABC-DEF-GHJ': { name: 'Me', cursor: 3, joinedAt: 1, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },
@@ -74,7 +80,7 @@ describe('Stop cleanup keeps live rooms through outages', () => {
     const dir = mkdtempSync(join(tmpdir(), 'agent-room-prune-failure-'));
     process.env.AGENT_ROOM_STATE_DIR = dir;
     process.env.CODEX_RUN_ID = 'run-1';
-    writeFileSync(join(dir, 'state-harness-codex.json'), JSON.stringify({
+    writeFileSync(harnessFile(dir), JSON.stringify({
       version: 1,
       rooms: { 'ABC-DEF-GHJ': { name: 'Me', cursor: 3, joinedAt: 1, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },
     }));

@@ -1,4 +1,5 @@
 import { promises as fs } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,6 +7,11 @@ import { mergeStates, type AgentRoomState } from '../src/state.js';
 
 async function makeStateDir(prefix: string) {
   return fs.mkdtemp(join(tmpdir(), prefix));
+}
+
+function harnessFile(dir: string, kind: string, sessionId: string) {
+  const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+  return join(dir, `state-harness-${kind}-${scope}.json`);
 }
 
 afterEach(() => {
@@ -101,9 +107,10 @@ describe('state harness files', () => {
     });
 
     const files = await fs.readdir(dir);
-    expect(files).toContain('state-harness-codex.json');
+    const filename = harnessFile(dir, 'codex', 'test-run');
+    expect(files).toContain(filename.split('/').at(-1));
 
-    const harnessRaw = await fs.readFile(join(dir, 'state-harness-codex.json'), 'utf8');
+    const harnessRaw = await fs.readFile(filename, 'utf8');
     expect(JSON.parse(harnessRaw).rooms['ABC-DEF-GHJ']).toMatchObject({
       name: 'Codex',
       cursor: 2,
@@ -116,7 +123,7 @@ describe('state harness files', () => {
     vi.stubEnv('CODEX_RUN_ID', 'test-run');
 
     await fs.writeFile(
-      join(dir, 'state-harness-codex.json'),
+      harnessFile(dir, 'codex', 'test-run'),
       JSON.stringify({
         version: 1,
         blockStreak: 0,
@@ -232,13 +239,36 @@ describe('state harness files', () => {
     vi.stubEnv('CLAUDECODE', '');
     vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
     const code = 'ABC-DEF-GHJ';
-    await fs.writeFile(join(dir, 'state-harness-codex.json'), JSON.stringify({
+    await fs.writeFile(harnessFile(dir, 'codex', 'test-run'), JSON.stringify({
       version: 1, rooms: { [code]: { name: 'Codex Host', client: 'cc', cursor: 7, joinedAt: 10, hostKey: 'codex-host-key' } },
     }));
 
     vi.resetModules();
     const { readRoomStateForSession } = await import('../src/state.js');
     expect(await readRoomStateForSession(code)).toMatchObject({ name: 'Codex Host', hostKey: 'codex-host-key' });
+  });
+
+  it('scopes Codex host recovery to the actual run id', async () => {
+    const dir = await makeStateDir('agent-room-state-codex-run-scope-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CLAUDECODE', '');
+    vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+    const code = 'ABC-DEF-GHJ';
+    await fs.writeFile(harnessFile(dir, 'codex', 'run-a'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Run A Host', client: 'cc', cursor: 2, joinedAt: 10, hostKey: 'run-a-host-key' } },
+    }));
+
+    vi.stubEnv('CODEX_RUN_ID', 'run-b');
+    vi.resetModules();
+    let stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForSession(code)).toBeUndefined();
+
+    vi.stubEnv('CODEX_RUN_ID', 'run-a');
+    vi.resetModules();
+    stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForSession(code)).toMatchObject({
+      name: 'Run A Host', hostKey: 'run-a-host-key',
+    });
   });
 });
 

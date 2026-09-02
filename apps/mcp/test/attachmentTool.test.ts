@@ -1,4 +1,5 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -27,7 +28,8 @@ function arrangeHarnessOnlyState() {
   delete process.env.CLAUDECODE; delete process.env.CLAUDE_CODE_ENTRYPOINT;
   delete process.env.AGENT_ROOM_STATE_FILE;
   process.env.AGENT_ROOM_BASE_URL = 'https://room.example';
-  writeFileSync(join(dir, 'state-harness-codex.json'), JSON.stringify({
+  const scope = createHash('sha256').update('run-1').digest('hex').slice(0, 16);
+  writeFileSync(join(dir, `state-harness-codex-${scope}.json`), JSON.stringify({
     version: 1,
     rooms: { [CODE]: { name: 'Me', cursor: 0, joinedAt: 1, accessToken: ACCESS, participantToken: PART } },
   }));

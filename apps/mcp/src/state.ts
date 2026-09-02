@@ -1,4 +1,5 @@
 import { promises as fs } from 'fs';
+import { createHash } from 'crypto';
 import { homedir } from 'os';
 import { join, dirname } from 'path';
 import { detectHarness } from './harness.js';
@@ -21,7 +22,10 @@ function currentHarnessStateFile(): string | null {
   if (process.env.AGENT_ROOM_STATE_FILE) return null;
   const kind = detectHarness().kind;
   if (kind !== 'cursor' && kind !== 'codex') return null;
-  return join(STATE_DIR, `state-harness-${kind}.json`);
+  const sessionId = kind === 'codex' ? process.env.CODEX_RUN_ID : process.env.CURSOR_TRACE_ID;
+  if (!sessionId) return null;
+  const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+  return join(STATE_DIR, `state-harness-${kind}-${scope}.json`);
 }
 
 export interface RoomState {
@@ -113,7 +117,7 @@ async function listStateFiles(): Promise<string[]> {
   try {
     const entries = await fs.readdir(STATE_DIR);
     files = entries
-      .filter((name) => /^state-(?:\d+|harness-[a-z-]+)\.json$/.test(name))
+      .filter((name) => /^state-(?:\d+|harness-[a-z-]+-[a-f0-9]{16})\.json$/.test(name))
       .map((name) => join(STATE_DIR, name));
   } catch {
     files = [];
@@ -142,8 +146,10 @@ export async function readRoomStateForCredentials(code: string): Promise<RoomSta
   const candidates = states
     .map((state) => state.rooms[code])
     .filter((room): room is RoomState => Boolean(room));
-  const knownIdentities = new Set(candidates.map((room) => `${room.name}\0${room.client ?? 'cc'}`));
-  const identity = current ?? harness ?? (knownIdentities.size === 1 ? candidates[0] : undefined);
+  // Cursor/Codex recovery is scoped to the actual run id. A globally unique
+  // participant in some other run is still foreign and must never become this
+  // session's host identity.
+  const identity = current ?? harness;
   if (!identity) return undefined;
 
   const matches = states
@@ -192,8 +198,7 @@ export async function readRoomStateForJoin(code: string, desiredName: string): P
 export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
   const harnessFile = currentHarnessStateFile();
   if (harnessFile) {
-    const harnessState = await readStateFile(harnessFile);
-    if (Object.keys(harnessState.rooms).length > 0) return harnessState;
+    return readStateFile(harnessFile);
   }
   return readMergedState();
 }

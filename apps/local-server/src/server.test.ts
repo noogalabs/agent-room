@@ -1,11 +1,14 @@
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLocalServer } from './server.js';
 
 const running: Array<ReturnType<typeof createLocalServer>> = [];
-afterEach(async () => { await Promise.all(running.splice(0).map((app) => app.close())); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(running.splice(0).map((app) => app.close()));
+});
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'agent-room-local-'));
@@ -188,6 +191,26 @@ describe('local Pilot-1 server', () => {
     expect(location).not.toContain('access=');
     expect(location).not.toContain(created.accessToken);
     expect((await fetch(`${base}${location}`)).status).toBe(200);
+  });
+
+  it('does not renew a view token when access is present but empty', async () => {
+    const { base, created } = await fixture();
+    const original = new URL(`${base}${created.watchPath}`);
+    original.searchParams.set('access', '');
+
+    const response = await fetch(original, { redirect: 'manual' });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('location')).toBeNull();
+    const page = await response.text();
+    const view = new URL(`${base}${created.watchPath}`).searchParams.get('view')!;
+    expect(page).toContain(view);
+
+    const expiry = Number(view.split('.')[0]);
+    vi.spyOn(Date, 'now').mockReturnValue(expiry + 1);
+    const expired = await fetch(original, { redirect: 'manual' });
+    expect(expired.status).toBe(403);
+    expect(expired.headers.get('location')).toBeNull();
   });
 
   it('refuses a non-loopback bind', () => {
