@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type { Message } from '@agent-room/shared';
-import { buildBootstrapOffer, credentialAnnouncement, HOSTED_IDENTITY, makeMessage, planReplies } from './agent.js';
+import { buildBootstrapOffer, credentialAnnouncement, HOSTED_IDENTITY, initializeHostedState, makeMessage, planReplies } from './agent.js';
 
 const REVISION = 'a'.repeat(40);
 const REPO = 'https://github.com/noogalabs/agent-room.git';
@@ -69,5 +69,17 @@ describe('hosted agent credential announcement', () => {
     expect(silent[1]).toContain('/data/hosted-agent.json');
     const loud = credentialAnnouncement(room, '/data/hosted-agent.json', { AGENT_ROOM_PRINT_CREDENTIALS: '1' });
     expect(loud).toEqual(['ROOM_CODE=ABC-DEF-GHJ', `ROOM_ACCESS_TOKEN=${room.accessToken}`]);
+  });
+
+  it('announces loaded state with opt-in credentials and otherwise only its path', async () => {
+    const create = vi.fn(async () => { throw new Error('loaded state must not create a room'); });
+    const save = vi.fn(async () => undefined);
+    const loud = await initializeHostedState(room, create, save, '/data/hosted-agent.json', { AGENT_ROOM_PRINT_CREDENTIALS: '1' });
+    expect(loud.announcement).toEqual(['ROOM_CODE=ABC-DEF-GHJ', `ROOM_ACCESS_TOKEN=${room.accessToken}`]);
+    const silent = await initializeHostedState(room, create, save, '/data/hosted-agent.json', {});
+    expect(silent.announcement.join('\n')).not.toContain(room.accessToken);
+    expect(silent.announcement[1]).toContain('/data/hosted-agent.json');
+    expect(create).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
   });
 });

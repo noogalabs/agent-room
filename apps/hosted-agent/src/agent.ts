@@ -101,3 +101,16 @@ export function credentialAnnouncement(room: { code: string; accessToken: string
   }
   return [`ROOM_CODE=${room.code}`, `room access token stored in ${statePath} (set AGENT_ROOM_PRINT_CREDENTIALS=1 to print it for a test room)`];
 }
+
+/** Load-or-create result plus the announcement emitted for both startup paths. */
+export async function initializeHostedState<T extends { code: string; accessToken: string }>(
+  loaded: T | null,
+  create: () => Promise<T>,
+  save: (state: T) => Promise<void>,
+  statePath: string,
+  env: NodeJS.ProcessEnv,
+): Promise<{ state: T; announcement: string[] }> {
+  const state = loaded ?? await create();
+  if (!loaded) await save(state);
+  return { state, announcement: credentialAnnouncement(state, statePath, env) };
+}
