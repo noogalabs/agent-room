@@ -67,4 +67,46 @@ describe('room credential rehydration after restart', () => {
     const { toolCredentialLoader } = await import('../src/credentials.js');
     expect(await toolCredentialLoader('SCO-PED-ONE')).toEqual({ accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) });
   });
+
+  it('keeps the current participant token when a newer foreign participant shares the room', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-room-cred-identity-'));
+    delete process.env.AGENT_ROOM_STATE_FILE;
+    process.env.AGENT_ROOM_STATE_DIR = dir;
+    process.env.CODEX_RUN_ID = 'test-run';
+    delete process.env.CLAUDECODE;
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    const code = 'SHR-RUM-ONE';
+    await writeFile(join(dir, `state-${process.ppid}.json`), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session A', client: 'cc', cursor: 0, joinedAt: 1, accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43) } },
+    }));
+    await writeFile(join(dir, 'state-999999.json'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session B', client: 'cc', cursor: 0, joinedAt: 99, accessToken: 'b'.repeat(43), participantToken: 'q'.repeat(43) } },
+    }));
+    vi.resetModules();
+    const calls = captureFetch();
+    const { toolCredentialLoader } = await import('../src/credentials.js');
+    const client = createRoomApiClient({ loadCredentials: toolCredentialLoader });
+    await client.post({ action: 'send', code, message: { text: 'from A' } });
+    expect(calls[0]!.headers['x-agent-room-access']).toBe('a'.repeat(43));
+    expect(calls[0]!.headers.authorization).toBe(`Bearer ${'p'.repeat(43)}`);
+  });
+
+  it('returns no credentials when only a foreign participant has capabilities', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-room-cred-foreign-'));
+    delete process.env.AGENT_ROOM_STATE_FILE;
+    process.env.AGENT_ROOM_STATE_DIR = dir;
+    process.env.CODEX_RUN_ID = 'test-run';
+    delete process.env.CLAUDECODE;
+    delete process.env.CLAUDE_CODE_ENTRYPOINT;
+    const code = 'SHR-RUM-TWO';
+    await writeFile(join(dir, `state-${process.ppid}.json`), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session A', client: 'cc', cursor: 0, joinedAt: 1 } },
+    }));
+    await writeFile(join(dir, 'state-999998.json'), JSON.stringify({
+      version: 1, rooms: { [code]: { name: 'Session B', client: 'cc', cursor: 0, joinedAt: 99, accessToken: 'b'.repeat(43), participantToken: 'q'.repeat(43) } },
+    }));
+    vi.resetModules();
+    const { toolCredentialLoader } = await import('../src/credentials.js');
+    expect(await toolCredentialLoader(code)).toBeUndefined();
+  });
 });

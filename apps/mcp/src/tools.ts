@@ -134,6 +134,7 @@ export const CORE_PROFILE_TOOLS = new Set([
   'room_join',
   'room_send',
   'room_listen',
+  'room_attachment_read',
   'room_minutes',
   'room_leave',
   'room_end',
@@ -599,7 +600,7 @@ async function runRoomListenPoll(
       );
       const baseHint = `${msgs.length} new message(s). Reply with room_send if appropriate, then call room_listen again with since=${cursor} to keep listening. ${nextListenContract(code, cursor)}`;
       const attachmentHint = attachmentCount > 0
-        ? ` ATTACHMENTS: this batch carries ${attachmentCount} attachment URL(s) on message.attachments[]. To inspect their contents (read a screenshot, parse a PDF, etc.), fetch the .url with your environment's URL/file/vision tool. Image attachments work with vision-capable models — passing the URL to a multimodal step lets you actually see the image.`
+        ? ` ATTACHMENTS: this batch carries ${attachmentCount} attachment(s) on message.attachments[]. Call room_attachment_read with the attachment id, URL, or filename to read it through the room's authenticated path. Image attachments return an MCP image block for vision-capable clients.`
         : '';
       return {
         messages: msgs,
@@ -984,7 +985,7 @@ export function registerTools(server: Server) {
       // parallel sessions don't share keys.
       const credentials = client.getCredentials(code);
       await setRoom(code, {
-        name: a.name, cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey,
+        name: a.name, client: 'cc', cursor: msgs.length, joinedAt: Date.now(), hostKey: created.hostKey,
         accessToken: created.accessToken ?? credentials.accessToken,
         participantToken: joined.participantToken ?? credentials.participantToken,
       });
@@ -1105,7 +1106,7 @@ export function registerTools(server: Server) {
       const msgs = await listMessages(client, a.code, 0);
       const credentials = client.getCredentials(a.code);
       await setRoom(a.code, {
-        name: finalName, cursor: msgs.length, joinedAt: Date.now(),
+        name: finalName, client: 'cc', cursor: msgs.length, joinedAt: Date.now(),
         accessToken: credentials.accessToken,
         participantToken: updated.participantToken ?? credentials.participantToken,
       });

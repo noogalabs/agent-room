@@ -10,7 +10,7 @@ type Handler = (req: any) => Promise<any>;
 const savedClaude = { CLAUDECODE: process.env.CLAUDECODE, CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT };
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.AGENT_ROOM_STATE_FILE; delete process.env.AGENT_ROOM_BASE_URL;
+  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.AGENT_ROOM_STATE_FILE; delete process.env.AGENT_ROOM_BASE_URL; delete process.env.AGENT_ROOM_PROFILE;
   if (savedClaude.CLAUDECODE !== undefined) process.env.CLAUDECODE = savedClaude.CLAUDECODE;
   if (savedClaude.CLAUDE_CODE_ENTRYPOINT !== undefined) process.env.CLAUDE_CODE_ENTRYPOINT = savedClaude.CLAUDE_CODE_ENTRYPOINT;
 });
@@ -74,6 +74,17 @@ describe('tool client after a harness restart', () => {
 });
 
 describe('room_attachment_read on a self-hosted room', () => {
+  it('is readable through the authenticated core profile', async () => {
+    arrangeHarnessOnlyState();
+    process.env.AGENT_ROOM_PROFILE = 'core';
+    const calls = stubFetch({ name: 'proof.txt', mime: 'text/plain', type: 'file', bytes: [112, 114, 111, 111, 102] });
+    const call = await tools();
+    const res = await call('room_attachment_read', { code: CODE, id: 'att-1' });
+    expect(res.content.map((part: any) => part.text ?? '').join('\n')).toContain('proof');
+    const get = calls.find((c) => c.url.includes('/attachments/'));
+    expect(get!.headers['x-agent-room-access']).toBe(ACCESS);
+  });
+
   it('returns an MCP image block for an image attachment', async () => {
     arrangeHarnessOnlyState();
     const calls = stubFetch({ name: 'pic.png', mime: 'image/png', type: 'image', bytes: [137, 80, 78, 71] });
