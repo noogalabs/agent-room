@@ -130,7 +130,10 @@ export function createLocalServer(options: LocalServerOptions) {
       if (req.method === 'GET' && url.pathname.startsWith('/attachments/')) {
         const file = basename(url.pathname);
         const code = file.slice(0, 11);
-        const suppliedAccess = url.searchParams.get('access') ?? '';
+        // Header first (the persisted URL no longer carries the token); the
+        // legacy ?access= form is still honored for URLs persisted before that.
+        const header = req.headers['x-agent-room-access'];
+        const suppliedAccess = (typeof header === 'string' && header !== '' ? header : null) ?? url.searchParams.get('access') ?? '';
         await store.read((db) => {
           const record = findRoom(db, code);
           if (hashSecret(suppliedAccess) !== record.accessHash) throw new HttpError(403, 'room_access_denied', 'Invalid attachment access token.');
@@ -159,7 +162,8 @@ export function createLocalServer(options: LocalServerOptions) {
         await writeFile(join(attachmentsDir, storedName), Buffer.from(await file.arrayBuffer()), { mode: 0o600 });
         const attachment: MessageAttachment = {
           id, type: file.type.startsWith('image/') ? 'image' : 'file',
-          url: `/attachments/${storedName}?access=${encodeURIComponent(accessToken(req))}`,
+          // No capability in the persisted URL: readers send x-agent-room-access.
+          url: `/attachments/${storedName}`,
           storageKey: storedName, name: file.name,
           size: file.size, mime: file.type || 'application/octet-stream', uploadedAt: Date.now(),
         };

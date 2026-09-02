@@ -23,7 +23,7 @@ export interface PollIo {
  */
 export async function pollOnce(state: PollState, io: PollIo): Promise<string[]> {
   const messages = await io.read(state.cursor);
-  const plan = planReplies(messages, state.cursor, HOSTED_IDENTITY.name, io.now ?? Date.now);
+  const plan = planReplies(messages, state.cursor, HOSTED_IDENTITY, io.now ?? Date.now);
   for (const text of plan.replies) {
     await io.send(makeMessage(text, (io.now ?? Date.now)()));
   }

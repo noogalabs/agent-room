@@ -137,8 +137,13 @@ describe('local Pilot-1 server', () => {
     expect(response.status).toBe(201);
     const attachment = await response.json() as any;
     expect(attachment.url).toMatch(/^\/attachments\//);
-    expect((await fetch(`${base}${attachment.url.split('?')[0]}`)).status).toBe(403);
-    expect(await (await fetch(`${base}${attachment.url}`)).text()).toBe('proof');
+    // The persisted URL carries no capability; the reader presents the room token as a header.
+    expect(attachment.url).not.toContain('access=');
+    expect(attachment.url).not.toContain(created.accessToken);
+    expect((await fetch(`${base}${attachment.url}`)).status).toBe(403);
+    expect(await (await fetch(`${base}${attachment.url}`, { headers: { 'x-agent-room-access': created.accessToken } })).text()).toBe('proof');
+    // URLs persisted before this change still resolve with the legacy query form.
+    expect(await (await fetch(`${base}${attachment.url}?access=${encodeURIComponent(created.accessToken)}`)).text()).toBe('proof');
   });
 
   it('serves an authenticated read-only watch page and transcript snapshot', async () => {

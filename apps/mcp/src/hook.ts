@@ -1,4 +1,5 @@
 import { createRoomApiClient, getRoom, listMessages } from './roomApi.js';
+import { stateCredentialLoader } from './credentials.js';
 import type { Message } from '@agent-room/shared';
 import {
   readState,
@@ -100,7 +101,7 @@ async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
   const codes = Object.keys(state.rooms);
   if (codes.length === 0) return [];
 
-  const client = createRoomApiClient();
+  const client = createRoomApiClient({ loadCredentials: stateCredentialLoader });
   const results: PendingRoom[] = [];
 
   for (const code of codes) {
@@ -311,7 +312,7 @@ export async function runHook(): Promise<void> {
     let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
     try {
       const state = await readHookState(stateScope);
-      const apiClient = createRoomApiClient();
+      const apiClient = createRoomApiClient({ loadCredentials: stateCredentialLoader });
       // Best-effort cleanup: drop rooms from local state that are gone
       // server-side (TTL expired) or marked ended, or where this agent is
       // no longer in the participants list. Without this, a left-over

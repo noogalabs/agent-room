@@ -38,12 +38,20 @@ export interface ReplyPlan {
  * Decide what the hosted agent says back. Only two inbound shapes get a reply:
  * a typed starter receipt (acknowledged with its disposition) and any other
  * non-self message (acknowledged as seen). Offers and the agent's own messages
- * are never answered, so the loop cannot talk to itself.
+ * (matched on name AND client) are never answered, so the loop cannot talk to itself.
  */
-export function planReplies(messages: readonly Message[], cursor: number, selfName: string, now: () => number = Date.now): ReplyPlan {
+export interface SelfIdentity {
+  name: string;
+  client: Message['client'];
+}
+
+export function planReplies(messages: readonly Message[], cursor: number, self: SelfIdentity, now: () => number = Date.now): ReplyPlan {
   const replies: string[] = [];
   for (const message of messages) {
-    if (message.name === selfName) continue;
+    // Self is the (name, client) identity the room enforces on send, never the
+    // display name alone: a peer that joins under our name on another client
+    // is a different participant and must still be answered.
+    if (message.name === self.name && message.client === self.client) continue;
     const parsed = parseJson(message.text);
     if (parsed?.kind === 'bootstrap_offer') continue;
     if (parsed?.kind === 'bootstrap_receipt') {
@@ -80,4 +88,16 @@ function parseJson(text: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * What the hosted agent prints about a freshly created room. Credentials stay
+ * in the mode-0600 state file; they reach stdout (and therefore the platform
+ * log) only under an explicit opt-in for throwaway test rooms.
+ */
+export function credentialAnnouncement(room: { code: string; accessToken: string }, statePath: string, env: NodeJS.ProcessEnv): string[] {
+  if (env.AGENT_ROOM_PRINT_CREDENTIALS === '1') {
+    return [`ROOM_CODE=${room.code}`, `ROOM_ACCESS_TOKEN=${room.accessToken}`];
+  }
+  return [`ROOM_CODE=${room.code}`, `room access token stored in ${statePath} (set AGENT_ROOM_PRINT_CREDENTIALS=1 to print it for a test room)`];
 }

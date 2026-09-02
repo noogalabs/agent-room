@@ -33,7 +33,9 @@ import {
   InvalidModeConfigError,
   ModeNotSupportedError,
   type RoomApiClient,
+  apiBaseUrl,
 } from './roomApi.js';
+import { stateCredentialLoader } from './credentials.js';
 import { AVATAR_PALETTE, roleBriefFor, normalizeEscapedWhitespace } from '@agent-room/shared';
 import type {
   Message,
@@ -375,9 +377,25 @@ function canReadAsText(a: MessageAttachment): boolean {
     /\.(txt|md|markdown|csv|json|html?|svg|log)$/i.test(a.name);
 }
 
-async function fetchAttachmentBytes(url: string, maxBytes: number): Promise<Uint8Array> {
-  const resp = await fetch(url);
-  if (!resp.ok) throw new Error(`GET ${url} returned ${resp.status}.`);
+export interface AttachmentFetchAuth {
+  accessToken?: string;
+}
+
+/**
+ * Local/self-hosted rooms return attachment URLs relative to the room API
+ * base and no longer embed the room capability, so the reader resolves the
+ * URL against AGENT_ROOM_BASE_URL and presents the token as a header.
+ */
+export function resolveAttachmentUrl(url: string, base: string = apiBaseUrl()): string {
+  return new URL(url, `${base}/`).toString();
+}
+
+export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: AttachmentFetchAuth = {}, fetchFn: typeof fetch = fetch): Promise<Uint8Array> {
+  const target = resolveAttachmentUrl(url);
+  const resp = await fetchFn(target, {
+    headers: auth.accessToken ? { 'x-agent-room-access': auth.accessToken } : {},
+  });
+  if (!resp.ok) throw new Error(`GET ${target} returned ${resp.status}.`);
   const buf = new Uint8Array(await resp.arrayBuffer());
   if (buf.byteLength > maxBytes) {
     throw new Error(`Attachment is ${buf.byteLength} bytes; this reader caps downloads at ${maxBytes} bytes.`);
@@ -385,7 +403,7 @@ async function fetchAttachmentBytes(url: string, maxBytes: number): Promise<Uint
   return buf;
 }
 
-async function readAttachmentText(a: MessageAttachment, maxChars: number): Promise<{ text?: string; source: string; warning?: string }> {
+async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; source: string; warning?: string }> {
   const existing = a.extractedText?.trim();
   if (existing) return { text: existing.slice(0, maxChars), source: 'stored_extractedText' };
 
@@ -399,12 +417,12 @@ async function readAttachmentText(a: MessageAttachment, maxChars: number): Promi
   const mime = a.mime.toLowerCase();
   const maxBytes = 10 * 1024 * 1024;
   if (canReadAsText(a)) {
-    const bytes = await fetchAttachmentBytes(a.url, maxBytes);
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     return { text: Buffer.from(bytes).toString('utf8').trim().slice(0, maxChars), source: 'fetched_text' };
   }
 
   if (mime === 'application/pdf' || /\.pdf$/i.test(a.name)) {
-    const bytes = await fetchAttachmentBytes(a.url, maxBytes);
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     const { extractText } = await import('unpdf');
     const extraction = await extractText(bytes, { mergePages: true });
     const merged = Array.isArray(extraction.text) ? extraction.text.join('\n\n') : String(extraction.text ?? '');
@@ -412,7 +430,7 @@ async function readAttachmentText(a: MessageAttachment, maxChars: number): Promi
   }
 
   if (mime === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || /\.docx$/i.test(a.name)) {
-    const bytes = await fetchAttachmentBytes(a.url, maxBytes);
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     const mammoth = await import('mammoth');
     const result = await mammoth.extractRawText({ buffer: Buffer.from(bytes) });
     return { text: String(result.value ?? '').trim().slice(0, maxChars), source: 'fetched_docx' };
@@ -556,7 +574,7 @@ async function readHostKey(code: string): Promise<string | undefined> {
 }
 
 export function registerTools(server: Server) {
-  const client = createRoomApiClient();
+  const client = createRoomApiClient({ loadCredentials: stateCredentialLoader });
   // Snapshot the host harness once at boot. This drives the persistence-setup
   // nudge in room_join / room_create — agents on harnesses that don't
   // auto-loop tool calls (Cursor without 1.7+ stop hook, Antigravity, etc.)
@@ -1507,7 +1525,8 @@ export function registerTools(server: Server) {
         ? Math.min(Math.max(1000, Math.floor(maxCharsRaw)), 30_000)
         : 12_000;
       try {
-        const read = await readAttachmentText(hit.attachment, maxChars);
+        const roomState = (await readState()).rooms[a.code];
+        const read = await readAttachmentText(hit.attachment, maxChars, { accessToken: roomState?.accessToken });
         return ok({
           ok: true,
           attachment: hit.attachment,
