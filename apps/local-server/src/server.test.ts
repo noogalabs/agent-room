@@ -140,7 +140,7 @@ describe('local Pilot-1 server', () => {
     // The persisted URL carries no capability; the reader presents the room token as a header.
     expect(attachment.url).not.toContain('access=');
     expect(attachment.url).not.toContain(created.accessToken);
-    expect((await fetch(`${base}${attachment.url}`)).status).toBe(403);
+    expect((await fetch(`${base}${attachment.url}`)).status).toBe(401);
     expect(await (await fetch(`${base}${attachment.url}`, { headers: { 'x-agent-room-access': created.accessToken } })).text()).toBe('proof');
     // URLs persisted before this change still resolve with the legacy query form.
     expect(await (await fetch(`${base}${attachment.url}?access=${encodeURIComponent(created.accessToken)}`)).text()).toBe('proof');
@@ -149,7 +149,7 @@ describe('local Pilot-1 server', () => {
   it('serves an authenticated read-only watch page and transcript snapshot', async () => {
     const { base, created } = await fixture();
     const denied = await fetch(`${base}/watch/${created.room.code}`);
-    expect(denied.status).toBe(403);
+    expect(denied.status).toBe(401);
 
     const watchUrl = `${base}/watch/${created.room.code}?access=${encodeURIComponent(created.accessToken)}`;
     const page = await fetch(watchUrl);
@@ -192,6 +192,37 @@ describe('local Pilot-1 server', () => {
       expect(denied.status).toBe(401);
     } finally {
       await app.close();
+    }
+  });
+
+  it('answers unauthenticated and wrongly authenticated requests identically for real and fabricated room codes', async () => {
+    const { base, created } = await fixture();
+    const real = created.room.code as string; const fake = 'ZZZ-ZZZ-ZZZ';
+    const wrong = { 'x-agent-room-access': 'w'.repeat(43) };
+    const shape = async (response: Response) => ({ status: response.status, type: response.headers.get('content-type'), body: await response.text() });
+    const post = (code: string, action: string, headers: Record<string, string> = {}) => fetch(`${base}/api/room`, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify({ action, code, cursor: 0, participant: { name: 'X', role: 'r', color: '#000', initials: 'XX', client: 'cc', joinedAt: 0, lastSeenAt: 0 } }),
+    });
+    const upload = (code: string, headers: Record<string, string> = {}) => { const form = new FormData(); form.append('roomCode', code); form.append('file', new File(['x'], 'x.txt')); return fetch(`${base}/api/upload`, { method: 'POST', headers, body: form }); };
+    const probes: Array<[string, (code: string) => Promise<Response>]> = [
+      ['attachment no token', (code) => fetch(`${base}/attachments/${code}-nope-x.txt`)],
+      ['attachment wrong token', (code) => fetch(`${base}/attachments/${code}-nope-x.txt`, { headers: wrong })],
+      ['attachment wrong legacy query', (code) => fetch(`${base}/attachments/${code}-nope-x.txt?access=${'w'.repeat(43)}`)],
+      ['watch no token', (code) => fetch(`${base}/watch/${code}`)],
+      ['watch wrong token', (code) => fetch(`${base}/watch-data/${code}?access=${'w'.repeat(43)}`)],
+      ['get no token', (code) => post(code, 'get')],
+      ['get wrong token', (code) => post(code, 'get', wrong)],
+      ['messages wrong token', (code) => post(code, 'messages', wrong)],
+      ['join no token', (code) => post(code, 'join')],
+      ['join wrong token', (code) => post(code, 'join', wrong)],
+      ['send wrong token', (code) => post(code, 'send', { ...wrong, authorization: 'Bearer ' + 'p'.repeat(43) })],
+      ['upload no token', (code) => upload(code)],
+      ['upload wrong token', (code) => upload(code, { ...wrong, authorization: 'Bearer ' + 'p'.repeat(43) })],
+    ];
+    for (const [label, probe] of probes) {
+      const [forReal, forFake] = await Promise.all([shape(await probe(real)), shape(await probe(fake))]);
+      expect(forFake, label).toEqual(forReal);
+      expect([401, 403], label).toContain(forReal.status);
     }
   });
 });
