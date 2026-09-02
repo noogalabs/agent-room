@@ -1,5 +1,5 @@
 import { createRoomApiClient, getRoom, listMessages } from './roomApi.js';
-import { stateCredentialLoader } from './credentials.js';
+import { credentialsFromState } from './credentials.js';
 import type { Message } from '@agent-room/shared';
 import {
   readState,
@@ -96,12 +96,16 @@ async function readHookState(scope: StateScope) {
   return scope === 'harness' ? readHarnessStateOrMerged() : readState();
 }
 
-async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
+export async function fetchPending(scope: StateScope): Promise<PendingRoom[]> {
   const state = await readHookState(scope);
   const codes = Object.keys(state.rooms);
   if (codes.length === 0) return [];
 
-  const client = createRoomApiClient({ loadCredentials: stateCredentialLoader });
+  // Credentials come from the SAME snapshot that enumerated the rooms. The
+  // hook process has its own PPID, so a PPID-scoped readState() can miss a
+  // room that only the harness-scoped file knows; the unauthenticated
+  // listMessages would then fail silently and cleanup could drop a live room.
+  const client = createRoomApiClient({ loadCredentials: async (code) => credentialsFromState(state, code) });
   const results: PendingRoom[] = [];
 
   for (const code of codes) {
@@ -312,7 +316,8 @@ export async function runHook(): Promise<void> {
     let activeRooms: Array<{ code: string; topic: string; selfName: string; cursor: number }> = [];
     try {
       const state = await readHookState(stateScope);
-      const apiClient = createRoomApiClient({ loadCredentials: stateCredentialLoader });
+      // Same snapshot rule as fetchPending: cleanup must never evaluate a room with missing capabilities.
+      const apiClient = createRoomApiClient({ loadCredentials: async (code) => credentialsFromState(state, code) });
       // Best-effort cleanup: drop rooms from local state that are gone
       // server-side (TTL expired) or marked ended, or where this agent is
       // no longer in the participants list. Without this, a left-over

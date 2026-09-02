@@ -390,11 +390,15 @@ export function resolveAttachmentUrl(url: string, base: string = apiBaseUrl()): 
   return new URL(url, `${base}/`).toString();
 }
 
+/** The room capability travels only to the room's own origin, never to a third-party attachment host. */
+export function attachmentAuthHeaders(target: string, auth: AttachmentFetchAuth, base: string = apiBaseUrl()): Record<string, string> {
+  if (!auth.accessToken) return {};
+  return new URL(target).origin === new URL(base).origin ? { 'x-agent-room-access': auth.accessToken } : {};
+}
+
 export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: AttachmentFetchAuth = {}, fetchFn: typeof fetch = fetch): Promise<Uint8Array> {
   const target = resolveAttachmentUrl(url);
-  const resp = await fetchFn(target, {
-    headers: auth.accessToken ? { 'x-agent-room-access': auth.accessToken } : {},
-  });
+  const resp = await fetchFn(target, { headers: attachmentAuthHeaders(target, auth) });
   if (!resp.ok) throw new Error(`GET ${target} returned ${resp.status}.`);
   const buf = new Uint8Array(await resp.arrayBuffer());
   if (buf.byteLength > maxBytes) {
@@ -403,19 +407,20 @@ export async function fetchAttachmentBytes(url: string, maxBytes: number, auth: 
   return buf;
 }
 
-async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; source: string; warning?: string }> {
+export async function readAttachmentText(a: MessageAttachment, maxChars: number, auth: AttachmentFetchAuth = {}): Promise<{ text?: string; image?: string; mime?: string; source: string; warning?: string }> {
   const existing = a.extractedText?.trim();
   if (existing) return { text: existing.slice(0, maxChars), source: 'stored_extractedText' };
 
-  if (a.type === 'image' || a.mime.toLowerCase().startsWith('image/')) {
-    return {
-      source: 'image_url',
-      warning: 'Image attachments are returned as URLs/metadata. Pass the URL to a vision-capable model or browser/image tool to inspect pixels.',
-    };
-  }
-
   const mime = a.mime.toLowerCase();
   const maxBytes = 10 * 1024 * 1024;
+  if (a.type === 'image' || mime.startsWith('image/')) {
+    // The URL may be a protected self-hosted path that a browser or vision
+    // tool cannot open (no origin, no capability), so the reader fetches the
+    // bytes with the room's credentials and hands back the image itself.
+    const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
+    return { source: 'fetched_image', image: Buffer.from(bytes).toString('base64'), mime: a.mime || 'application/octet-stream' };
+  }
+
   if (canReadAsText(a)) {
     const bytes = await fetchAttachmentBytes(a.url, maxBytes, auth);
     return { text: Buffer.from(bytes).toString('utf8').trim().slice(0, maxChars), source: 'fetched_text' };
@@ -1533,6 +1538,7 @@ export function registerTools(server: Server) {
           message: hit.message,
           source: read.source,
           text: read.text,
+          ...(read.image === undefined ? {} : { image: read.image, mime: read.mime }),
           warning: read.warning,
         });
       } catch (e) {
