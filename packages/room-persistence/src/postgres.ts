@@ -3,6 +3,7 @@ import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { POSTGRES_SCHEMA_SQL } from './schema.js';
 import { PersistenceSchemaError, type LeaseEventInput, type LeaseMembershipPrecondition, type RoomPersistence, type RoomReceipt } from './types.js';
 import { sameJson } from './json.js';
+import { assertPostgresTargetAllowed } from './database-url.js';
 
 const REQUIRED_SCHEMA_VERSION = 1;
 
@@ -23,7 +24,10 @@ export class PostgresRoomPersistence implements RoomPersistence {
     private readonly ownsPool: boolean,
   ) {}
 
-  static async connect(config: PoolConfig): Promise<PostgresRoomPersistence> {
+  static async connect(config: PoolConfig, options: { allowRemote?: boolean } = {}): Promise<PostgresRoomPersistence> {
+    if (typeof config.connectionString === 'string') {
+      assertPostgresTargetAllowed(config.connectionString, options.allowRemote === true);
+    }
     const store = new PostgresRoomPersistence(new Pool(config), true);
     try {
       await store.verifySchema();
@@ -308,8 +312,14 @@ export class PostgresRoomPersistence implements RoomPersistence {
   }
 }
 
-export async function applyPostgresMigrations(config: PoolConfig): Promise<void> {
-  const pool = new Pool(config);
+export async function applyPostgresMigrations(
+  config: PoolConfig,
+  options: { allowRemote?: boolean; poolFactory?: (config: PoolConfig) => Pool } = {},
+): Promise<void> {
+  if (typeof config.connectionString === 'string') {
+    assertPostgresTargetAllowed(config.connectionString, options.allowRemote === true);
+  }
+  const pool = options.poolFactory?.(config) ?? new Pool(config);
   try {
     await pool.query(POSTGRES_SCHEMA_SQL);
   } finally {

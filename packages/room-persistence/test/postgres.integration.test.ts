@@ -51,7 +51,7 @@ describePostgres('Postgres durable room production entry', () => {
   beforeAll(async () => {
     admin = new Pool({ connectionString: databaseUrl });
     first = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     // Synthetic CI database dedicated to this job; clearing it makes retries deterministic.
     await admin.query(`TRUNCATE agent_room_receipts, agent_room_minutes, agent_room_task_boards,
@@ -114,7 +114,7 @@ describePostgres('Postgres durable room production entry', () => {
     vi.useFakeTimers();
     vi.setSystemTime(room().createdAt + 25 * 60 * 60 * 1000);
     const restarted = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     try {
       expect(await restarted.getRoom(room().code)).toEqual(room());

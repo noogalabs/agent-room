@@ -2,6 +2,7 @@ import { createClient, type UpstashClient } from '@agent-room/upstash-client';
 import type { Pool } from 'pg';
 import { PostgresRoomPersistence } from './postgres.js';
 import { RedisRoomPersistence } from './redis.js';
+import { assertPostgresTargetAllowed } from './database-url.js';
 import {
   PersistenceConfigurationError,
   type PersistenceKind,
@@ -10,7 +11,8 @@ import {
 
 export interface PersistenceEnvironment {
   AGENT_ROOM_PERSISTENCE?: string;
-  DATABASE_URL?: string;
+  AGENT_ROOM_DATABASE_URL?: string;
+  AGENT_ROOM_ALLOW_REMOTE_DB?: string;
   UPSTASH_REDIS_REST_URL?: string;
   UPSTASH_REDIS_REST_TOKEN?: string;
 }
@@ -43,12 +45,15 @@ export async function createRoomPersistence(
   if (dependencies.postgresPool) {
     return PostgresRoomPersistence.fromPool(dependencies.postgresPool);
   }
-  if (!env.DATABASE_URL?.trim()) {
+  if (!env.AGENT_ROOM_DATABASE_URL?.trim()) {
     throw new PersistenceConfigurationError(
-      'DATABASE_URL is required when AGENT_ROOM_PERSISTENCE=postgres',
+      'AGENT_ROOM_DATABASE_URL is required when AGENT_ROOM_PERSISTENCE=postgres',
     );
   }
-  return PostgresRoomPersistence.connect({ connectionString: env.DATABASE_URL });
+  assertPostgresTargetAllowed(env.AGENT_ROOM_DATABASE_URL, env.AGENT_ROOM_ALLOW_REMOTE_DB === '1');
+  return PostgresRoomPersistence.connect({ connectionString: env.AGENT_ROOM_DATABASE_URL }, {
+    allowRemote: env.AGENT_ROOM_ALLOW_REMOTE_DB === '1',
+  });
 }
 
 function redisClientFromEnvironment(env: PersistenceEnvironment): UpstashClient {

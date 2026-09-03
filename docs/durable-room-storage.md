@@ -83,7 +83,7 @@ application does not auto-mutate production schema at request time.
 
 1. Deploy the seam with `redis` as the default; behavior and TTL stay unchanged.
 2. Provision Postgres and explicitly run the reviewed schema migration with
-   `npm run migrate:postgres -w packages/room-persistence`; application startup
+   `AGENT_ROOM_DATABASE_URL=postgresql://... npm run migrate:postgres -w packages/room-persistence`; application startup
    verifies the schema version and fails closed without mutating it.
 3. Run a dry-run backfill that reads live Redis rooms and related keys, validates
    shared types, and reports counts/conflicts without writing.
