@@ -7,6 +7,7 @@ import { PostgresRoomPersistence } from '../src/postgres.js';
 import { PersistenceSchemaError, type RoomReceipt } from '../src/types.js';
 import { proveImmutableRecordParity } from './parity-contract.js';
 import { AgentCardVerifier, AuthenticatedRoomJoinServer, signAgentCard } from '../src/member-auth.js';
+import { TaskLeaseServer } from '../src/task-leases.js';
 
 const databaseUrl = process.env.TEST_POSTGRES_URL;
 const describePostgres = databaseUrl ? describe : describe.skip;
@@ -175,6 +176,45 @@ describePostgres('Postgres durable room production entry', () => {
     try {
       expect((await restarted.getRoom(durableRoom.code))?.participants).toEqual([participant]);
       expect(participant.authenticatedIdentity?.fleetId).toBe('fleet-ci');
+    } finally {
+      await restarted.close();
+    }
+  });
+
+  it('atomically persists a task lease and its ledger event across restart', async () => {
+    vi.useRealTimers();
+    const server = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+    });
+    const actor = { memberId: 'fingerprint-lease-ci', name: 'Lease Agent', client: 'cc' as const };
+    const durableRoom: Room = {
+      ...room(), code: 'PGS-TSK-LES', version: 1,
+      participants: [{
+        name: actor.name, initials: 'LA', color: '#789', role: 'builder', client: actor.client,
+        joinedAt: 1, lastSeenAt: 1,
+        authenticatedIdentity: {
+          cardFingerprint: actor.memberId, fleetId: 'fleet-ci', cardName: actor.name,
+          scheme: 'oauth2', keyId: 'key-ci', verifiedAt: 1,
+        },
+      }],
+    };
+    const durableBoard: TaskBoard = { code: durableRoom.code, version: 1, tasks: [{
+      id: 'T-CI', title: 'Lease persistence', state: 'in_progress', createdBy: 'Host', createdAt: 1, updatedAt: 1,
+    }] };
+    await server.createRoom(durableRoom);
+    expect(await server.updateTaskBoard(durableRoom.code, null, durableBoard)).toBe(true);
+    const leases = new TaskLeaseServer(server, () => 100, () => 'ci');
+    await leases.claim(durableRoom.code, 'T-CI', actor);
+    await server.close();
+
+    const restarted = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+    });
+    try {
+      expect((await restarted.getTaskBoard(durableRoom.code))?.tasks[0]?.lease)
+        .toMatchObject({ holderId: actor.memberId, status: 'active' });
+      expect((await restarted.listReceipts(durableRoom.code)).map(item => item.leaseEvent))
+        .toEqual(['granted']);
     } finally {
       await restarted.close();
     }

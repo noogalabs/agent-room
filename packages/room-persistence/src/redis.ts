@@ -34,6 +34,31 @@ const BOARD_CAS_SCRIPT = [
   'return 1',
 ].join('\n');
 
+const BOARD_AND_LEASE_EVENTS_CAS_SCRIPT = [
+  "local raw = redis.call('GET', KEYS[1])",
+  "if ARGV[1] == 'absent' then",
+  '  if raw then return 0 end',
+  'else',
+  '  if not raw then return 0 end',
+  '  local current = cjson.decode(raw)',
+  '  if tonumber(current.version) ~= tonumber(ARGV[2]) then return 0 end',
+  'end',
+  'local event_count = tonumber(ARGV[5])',
+  'for i = 1, event_count do',
+  '  local id_index = 6 + ((i - 1) * 2)',
+  "  if redis.call('SISMEMBER', KEYS[2], ARGV[id_index]) == 1 then return redis.error_reply('lease event id collision') end",
+  'end',
+  "redis.call('SET', KEYS[1], ARGV[3], 'EX', tonumber(ARGV[4]))",
+  'for i = 1, event_count do',
+  '  local id_index = 6 + ((i - 1) * 2)',
+  '  redis.call(\'SADD\', KEYS[2], ARGV[id_index])',
+  '  redis.call(\'RPUSH\', KEYS[3], ARGV[id_index + 1])',
+  'end',
+  "redis.call('EXPIRE', KEYS[2], tonumber(ARGV[4]))",
+  "redis.call('EXPIRE', KEYS[3], tonumber(ARGV[4]))",
+  'return 1',
+].join('\n');
+
 const RECEIPT_SCRIPT = [
   "if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then",
   "  local rows = redis.call('LRANGE', KEYS[2], 0, -1)",
@@ -135,6 +160,28 @@ export class RedisRoomPersistence implements RoomPersistence {
       expectedVersion === null ? 'absent' : 'present',
       expectedVersion === null ? '' : String(expectedVersion),
       JSON.stringify(next), String(ROOM_TTL_SECONDS),
+    ]);
+    return Number(result) === 1;
+  }
+
+  async compareAndSwapTaskBoardWithLeaseEvents(
+    code: string,
+    expectedVersion: number | null,
+    next: TaskBoard,
+    events: readonly LeaseEventInput[],
+  ): Promise<boolean> {
+    const receipts: RoomReceipt[] = events.map(event => ({
+      id: event.id, roomCode: event.roomCode, kind: 'lease_event', createdAt: event.at,
+      leaseEvent: event.event,
+      payload: { actor: event.actor, leaseId: event.leaseId, ...(event.details ?? {}) },
+    }));
+    const result = await this.client.command<number>([
+      'EVAL', BOARD_AND_LEASE_EVENTS_CAS_SCRIPT, '3', taskBoardKey(code),
+      receiptIdsKey(code), receiptsKey(code),
+      expectedVersion === null ? 'absent' : 'present',
+      expectedVersion === null ? '' : String(expectedVersion),
+      JSON.stringify(next), String(ROOM_TTL_SECONDS), String(receipts.length),
+      ...receipts.flatMap(receipt => [receipt.id, JSON.stringify(receipt)]),
     ]);
     return Number(result) === 1;
   }

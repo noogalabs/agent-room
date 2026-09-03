@@ -44,6 +44,12 @@ export interface RoomPersistence {
     expectedVersion: number | null,
     next: TaskBoard,
   ): Promise<boolean>;
+  compareAndSwapTaskBoardWithLeaseEvents(
+    code: string,
+    expectedVersion: number | null,
+    next: TaskBoard,
+    events: readonly LeaseEventInput[],
+  ): Promise<boolean>;
 
   putMinutes(code: string, reportId: string, report: RoomReport): Promise<void>;
   getMinutes(code: string, reportId: string): Promise<RoomReport | null>;

@@ -20,6 +20,7 @@ class RecordingRedis implements UpstashClient {
     }
     if (name === 'GET') return (this.values.get(String(key)) ?? null) as T;
     if (name === 'LRANGE') return [] as T;
+    if (name === 'EVAL') return 1 as T;
     throw new Error(`Unsupported fake command ${String(name)}`);
   }
 
@@ -193,5 +194,23 @@ describe('RedisRoomPersistence compatibility', () => {
   it('matches the durable adapter collision contract for minutes and receipts', async () => {
     const store = new RedisRoomPersistence(new StatefulRedis());
     await proveImmutableRecordParity(store, room(), report(), receipt());
+  });
+
+  it('sends the board transition and lease receipts through one Redis script', async () => {
+    const redis = new RecordingRedis();
+    const store = new RedisRoomPersistence(redis);
+    const next = { code: room().code, version: 2, tasks: [] };
+    expect(await store.compareAndSwapTaskBoardWithLeaseEvents(room().code, 1, next, [{
+      id: 'lease-event-1', roomCode: room().code, event: 'granted', actor: 'fingerprint',
+      leaseId: 'task-lease-1', at: 10, details: { taskId: 'T-01' },
+    }])).toBe(true);
+
+    const command = redis.commands.at(-1)!;
+    expect(command.slice(0, 6)).toEqual([
+      'EVAL', expect.any(String), '3', `task-board:${room().code}`,
+      `room-receipt-ids:${room().code}`, `room-receipts:${room().code}`,
+    ]);
+    expect(command.join(' ')).toContain('lease-event-1');
+    expect(command.join(' ')).toContain('"leaseEvent":"granted"');
   });
 });

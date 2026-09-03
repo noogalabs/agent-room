@@ -33,6 +33,14 @@ export class RoomRecordServer {
   updateTaskBoard(code: string, expectedVersion: number | null, next: TaskBoard): Promise<boolean> {
     return this.persistence.compareAndSwapTaskBoard(code, expectedVersion, next);
   }
+  updateTaskBoardWithLeaseEvents(
+    code: string,
+    expectedVersion: number | null,
+    next: TaskBoard,
+    events: readonly LeaseEventInput[],
+  ): Promise<boolean> {
+    return this.persistence.compareAndSwapTaskBoardWithLeaseEvents(code, expectedVersion, next, events);
+  }
   putMinutes(code: string, reportId: string, report: RoomReport): Promise<void> {
     return this.persistence.putMinutes(code, reportId, report);
   }
