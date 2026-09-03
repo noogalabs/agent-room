@@ -24,11 +24,12 @@ export class PostgresRoomPersistence implements RoomPersistence {
     private readonly ownsPool: boolean,
   ) {}
 
-  static async connect(config: PoolConfig, options: { allowRemote?: boolean } = {}): Promise<PostgresRoomPersistence> {
-    if (typeof config.connectionString === 'string') {
-      assertPostgresTargetAllowed(config.connectionString, options.allowRemote === true);
-    }
-    const store = new PostgresRoomPersistence(new Pool(config), true);
+  static async connect(
+    config: PoolConfig,
+    options: { allowRemote?: boolean; poolFactory?: (config: PoolConfig) => Pool } = {},
+  ): Promise<PostgresRoomPersistence> {
+    assertPostgresTargetAllowed(config, options.allowRemote === true);
+    const store = new PostgresRoomPersistence(options.poolFactory?.(config) ?? new Pool(config), true);
     try {
       await store.verifySchema();
       return store;
@@ -316,9 +317,7 @@ export async function applyPostgresMigrations(
   config: PoolConfig,
   options: { allowRemote?: boolean; poolFactory?: (config: PoolConfig) => Pool } = {},
 ): Promise<void> {
-  if (typeof config.connectionString === 'string') {
-    assertPostgresTargetAllowed(config.connectionString, options.allowRemote === true);
-  }
+  assertPostgresTargetAllowed(config, options.allowRemote === true);
   const pool = options.poolFactory?.(config) ?? new Pool(config);
   try {
     await pool.query(POSTGRES_SCHEMA_SQL);

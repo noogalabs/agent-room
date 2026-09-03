@@ -50,7 +50,10 @@ export async function createRoomPersistence(
       'AGENT_ROOM_DATABASE_URL is required when AGENT_ROOM_PERSISTENCE=postgres',
     );
   }
-  assertPostgresTargetAllowed(env.AGENT_ROOM_DATABASE_URL, env.AGENT_ROOM_ALLOW_REMOTE_DB === '1');
+  assertPostgresTargetAllowed(
+    { connectionString: env.AGENT_ROOM_DATABASE_URL },
+    env.AGENT_ROOM_ALLOW_REMOTE_DB === '1',
+  );
   return PostgresRoomPersistence.connect({ connectionString: env.AGENT_ROOM_DATABASE_URL }, {
     allowRemote: env.AGENT_ROOM_ALLOW_REMOTE_DB === '1',
   });

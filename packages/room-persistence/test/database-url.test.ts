@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import type { Pool } from 'pg';
-import { applyPostgresMigrations } from '../src/postgres.js';
+import { applyPostgresMigrations, PostgresRoomPersistence } from '../src/postgres.js';
 import { migrationTarget, postgresTargetFromEnvironment } from '../src/database-url.js';
 
 const local = 'postgresql://agent_room:test@127.0.0.1:5432/agent_room';
@@ -27,6 +27,24 @@ describe('agent-room database URL custody', () => {
     const poolFactory = vi.fn(() => ({}) as Pool);
     await expect(applyPostgresMigrations({ connectionString: remote }, { poolFactory }))
       .rejects.toThrow('Remote agent-room Postgres host production.example.invalid refused');
+    expect(poolFactory).not.toHaveBeenCalled();
+  });
+
+  it('refuses a remote host-object migration target before the pool factory', async () => {
+    const poolFactory = vi.fn(() => ({}) as Pool);
+    await expect(applyPostgresMigrations(
+      { host: 'production.example.invalid', database: 'agent_room' },
+      { poolFactory },
+    )).rejects.toThrow('Remote agent-room Postgres host production.example.invalid refused');
+    expect(poolFactory).not.toHaveBeenCalled();
+  });
+
+  it('refuses a remote host-object persistence target before the pool factory', async () => {
+    const poolFactory = vi.fn(() => ({}) as Pool);
+    await expect(PostgresRoomPersistence.connect(
+      { host: 'production.example.invalid', database: 'agent_room' },
+      { poolFactory },
+    )).rejects.toThrow('Remote agent-room Postgres host production.example.invalid refused');
     expect(poolFactory).not.toHaveBeenCalled();
   });
 

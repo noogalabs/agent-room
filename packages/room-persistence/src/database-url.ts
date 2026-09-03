@@ -11,6 +11,11 @@ export interface MigrationTarget {
   allowRemote: boolean;
 }
 
+export interface PostgresTargetConfig {
+  connectionString?: string;
+  host?: string;
+}
+
 export function postgresTargetFromEnvironment(env: DatabaseEnvironment): MigrationTarget {
   const connectionString = env.TEST_POSTGRES_URL?.trim() || env.AGENT_ROOM_DATABASE_URL?.trim();
   if (!connectionString) {
@@ -35,14 +40,28 @@ export function migrationTarget(
   };
 }
 
-export function assertPostgresTargetAllowed(connectionString: string, allowRemote: boolean): void {
-  let host: string;
-  try {
-    host = new URL(connectionString).hostname;
-  } catch {
-    throw new PersistenceConfigurationError('Agent-room Postgres URL is malformed.');
+export function postgresTargetHost(
+  config: PostgresTargetConfig,
+  env: Partial<Pick<NodeJS.ProcessEnv, 'PGHOST'>> = process.env,
+): string {
+  if (config.connectionString?.trim()) {
+    try {
+      return new URL(config.connectionString).hostname;
+    } catch {
+      throw new PersistenceConfigurationError('Agent-room Postgres URL is malformed.');
+    }
   }
-  const local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1';
+  return config.host?.trim() || env.PGHOST?.trim() || 'localhost';
+}
+
+export function assertPostgresTargetAllowed(
+  config: PostgresTargetConfig,
+  allowRemote: boolean,
+  env: Partial<Pick<NodeJS.ProcessEnv, 'PGHOST'>> = process.env,
+): void {
+  const host = postgresTargetHost(config, env);
+  const local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1'
+    || host.startsWith('/');
   if (!local && !allowRemote) {
     throw new PersistenceConfigurationError(
       `Remote agent-room Postgres host ${host} refused; pass --allow-remote or set AGENT_ROOM_ALLOW_REMOTE_DB=1.`,
