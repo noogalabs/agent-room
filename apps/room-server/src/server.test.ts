@@ -1,5 +1,6 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { Server as HttpServer } from 'node:http';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,8 +8,7 @@ import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RoomRecordServer, signAgentCard } from '@agent-room/room-persistence';
 import type { Room } from '@agent-room/shared';
-import { createHostedRoomServer } from './server.js';
-import { loadTrustStore } from './trust-store.js';
+import { createHostedRoomServer, startHostedRoomServer } from './server.js';
 
 const opened: Array<Awaited<ReturnType<typeof createHostedRoomServer>>> = [];
 const execFileAsync = promisify(execFile);
@@ -28,19 +28,27 @@ function room(): Room {
 }
 
 describe('hosted room production entry', () => {
-  it('refuses missing, malformed, private, and duplicate trust stores before persistence or listen', async () => {
+  it('refuses every invalid trust store through the production entry before persistence or listen', async () => {
     const fromEnvironment = vi.spyOn(RoomRecordServer, 'fromEnvironment');
-    await expect(createHostedRoomServer({})).rejects.toMatchObject({ name: 'trust_store_required' });
+    const listen = vi.spyOn(HttpServer.prototype, 'listen');
+    await expect(startHostedRoomServer({})).rejects.toMatchObject({ name: 'trust_store_required' });
     const dir = await mkdtemp(join(tmpdir(), 'bad-trust-')); const bad = join(dir, 'bad.json');
+    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: join(dir, 'missing.json') })).rejects.toMatchObject({ name: 'trust_store_invalid' });
     await writeFile(bad, '{');
-    await expect(createHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_invalid' });
+    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_invalid' });
+    await writeFile(bad, '[]');
+    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_empty' });
     const keys = generateKeyPairSync('ed25519');
     await writeFile(bad, JSON.stringify([{ fleetId: 'a', keyId: 'k', publicKey: keys.privateKey.export({ format: 'jwk' }) }]));
-    await expect(loadTrustStore(bad)).rejects.toMatchObject({ name: 'trust_store_key_invalid' });
+    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_key_invalid' });
+    const unsupported = generateKeyPairSync('rsa', { modulusLength: 2048 });
+    await writeFile(bad, JSON.stringify([{ fleetId: 'a', keyId: 'k', publicKey: unsupported.publicKey.export({ format: 'jwk' }) }]));
+    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_key_invalid' });
     const pub = keys.publicKey.export({ format: 'jwk' });
     await writeFile(bad, JSON.stringify([{ fleetId: 'a', keyId: 'k', publicKey: pub }, { fleetId: 'a', keyId: 'k', publicKey: pub }]));
-    await expect(loadTrustStore(bad)).rejects.toMatchObject({ name: 'trust_store_duplicate_key' });
+    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_duplicate_key' });
     expect(fromEnvironment).not.toHaveBeenCalled();
+    expect(listen).not.toHaveBeenCalled();
   });
 
   it('requires a signed card before participant write and persists one valid authenticated join', async () => {
