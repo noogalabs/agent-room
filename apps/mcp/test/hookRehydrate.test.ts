@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -61,7 +61,9 @@ describe('Stop cleanup keeps live rooms through outages', () => {
     vi.resetModules();
     const { pruneRooms } = await import('../src/hook.js');
     const active = await pruneRooms('harness');
-    const rooms = Object.keys(JSON.parse(readFileSync(file, 'utf8')).rooms);
+    const rooms = existsSync(file)
+      ? Object.keys(JSON.parse(readFileSync(file, 'utf8')).rooms)
+      : [];
     return { active, rooms };
   }
 
@@ -138,7 +140,7 @@ describe('harness hook mutations stay in the active session', () => {
     expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
 
     await pruneRoomsForStop('harness');
-    expect(JSON.parse(readFileSync(runA, 'utf8')).rooms).toEqual({});
+    expect(existsSync(runA)).toBe(false);
     expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
   });
 

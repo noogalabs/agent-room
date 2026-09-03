@@ -134,6 +134,27 @@ describe('state harness files', () => {
     });
   });
 
+  it('prunes empty per-session harness files after sessions leave', async () => {
+    const dir = await makeStateDir('agent-room-state-prune-harness-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+
+    for (const sessionId of ['run-a', 'run-b', 'run-c']) {
+      vi.stubEnv('CODEX_RUN_ID', sessionId);
+      vi.resetModules();
+      const stateModule = await import('../src/state.js');
+      await stateModule.setRoom('ABC-DEF-GHJ', {
+        name: sessionId, cursor: 0, joinedAt: 1,
+      });
+      await stateModule.removeRoomEverywhere('ABC-DEF-GHJ');
+    }
+
+    const files = await fs.readdir(dir);
+    expect(files.filter((name) => name.startsWith('state-harness-'))).toEqual([]);
+    expect(files.filter((name) => name.startsWith('state-'))).toEqual([
+      `state-${process.ppid}.json`,
+    ]);
+  });
+
   it('recovers Codex state by thread id and isolates a foreign thread', async () => {
     const dir = await makeStateDir('agent-room-state-codex-thread-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);

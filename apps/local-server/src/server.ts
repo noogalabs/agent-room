@@ -163,7 +163,13 @@ export function createLocalServer(options: LocalServerOptions) {
           'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
           'x-frame-options': 'DENY',
         });
-        res.end(watchPage(code, url.searchParams.get('view') ?? watchToken(record)));
+        // A query token is safe to reuse only when it was the credential that
+        // authenticated this request. Header authentication must replace any
+        // stale/tampered query value with a fresh usable view capability.
+        const authenticatedByHeader = Boolean(headerAccess(req));
+        const suppliedView = url.searchParams.get('view');
+        res.end(watchPage(code,
+          !authenticatedByHeader && suppliedView ? suppliedView : watchToken(record)));
         return;
       }
       if (req.method === 'GET' && url.pathname.startsWith('/watch-data/')) {

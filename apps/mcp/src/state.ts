@@ -1,7 +1,7 @@
 import { promises as fs } from 'fs';
 import { createHash, randomUUID } from 'crypto';
 import { homedir } from 'os';
-import { join, dirname } from 'path';
+import { basename, join, dirname } from 'path';
 import { detectHarness } from './harness.js';
 
 const STATE_DIR = process.env.AGENT_ROOM_STATE_DIR || join(homedir(), '.agent-room');
@@ -388,6 +388,13 @@ export async function removeRoomEverywhere(code: string): Promise<void> {
       const state = await readStateFile(file);
       if (!(code in state.rooms)) return;
       delete state.rooms[code];
+      if (file !== STATE_FILE && basename(file).startsWith('state-harness-')
+          && Object.keys(state.rooms).length === 0) {
+        await fs.unlink(file).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        return;
+      }
       await writeStateFile(file, state);
     }));
   });

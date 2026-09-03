@@ -193,6 +193,23 @@ describe('local Pilot-1 server', () => {
     expect((await fetch(`${base}${location}`)).status).toBe(200);
   });
 
+  it('mints a fresh usable view token when the access header authenticated the page', async () => {
+    const { base, created } = await fixture();
+    const pageResponse = await fetch(
+      `${base}/watch/${created.room.code}?view=tampered`,
+      { headers: { 'x-agent-room-access': created.accessToken } },
+    );
+    expect(pageResponse.status).toBe(200);
+    const page = await pageResponse.text();
+    const encoded = page.match(/const view=("[^"]+")/)?.[1];
+    expect(encoded).toBeTruthy();
+    const freshView = JSON.parse(encoded!);
+    expect(freshView).not.toBe('tampered');
+    expect((await fetch(
+      `${base}/watch-data/${created.room.code}?view=${encodeURIComponent(freshView)}`,
+    )).status).toBe(200);
+  });
+
   it('does not renew a view token when access is present but empty', async () => {
     const { base, created } = await fixture();
     const original = new URL(`${base}${created.watchPath}`);
