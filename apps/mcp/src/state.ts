@@ -28,7 +28,7 @@ function currentHarnessSessionId(kind: 'cursor' | 'codex'): string {
   if (kind === 'codex') {
     return process.env.CODEX_THREAD_ID || process.env.CODEX_RUN_ID || HARNESS_PROCESS_NONCE;
   }
-  return process.env.CURSOR_TRACE_ID || process.env.CURSOR_AGENT || HARNESS_PROCESS_NONCE;
+  return process.env.CURSOR_TRACE_ID || HARNESS_PROCESS_NONCE;
 }
 
 function currentHarnessStateFile(): string | null {

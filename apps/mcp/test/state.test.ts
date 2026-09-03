@@ -160,31 +160,40 @@ describe('state harness files', () => {
     expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toBeUndefined();
   });
 
-  it('recovers Cursor state by its agent id and isolates a foreign agent', async () => {
-    const dir = await makeStateDir('agent-room-state-cursor-agent-');
+  it('does not treat the Cursor harness marker as a session identity', async () => {
+    const dir = await makeStateDir('agent-room-state-cursor-marker-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
     vi.stubEnv('CODEX_HOME', '');
     vi.stubEnv('CODEX_RUN_ID', '');
     vi.stubEnv('CURSOR_TRACE_ID', '');
-    vi.stubEnv('CURSOR_AGENT', 'cursor-session-a');
+    vi.stubEnv('CURSOR_AGENT', '1');
 
     let stateModule = await import('../src/state.js');
-    await stateModule.setRoom('ABC-DEF-GHJ', {
+    await stateModule.setRoom('AAA-BBB-CCC', {
       name: 'Cursor A Host', cursor: 5, joinedAt: 234, hostKey: 'cursor-a-host-key',
     });
-    expect(await fs.readFile(harnessFile(dir, 'cursor', 'cursor-session-a'), 'utf8')).toContain('cursor-a-host-key');
+    // Model a distinct Cursor process: it has its own PPID file, but presents
+    // the same boolean CURSOR_AGENT marker and no trace identifier.
+    await fs.rm(join(dir, `state-${process.ppid}.json`));
 
     vi.resetModules();
     stateModule = await import('../src/state.js');
-    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toMatchObject({
-      name: 'Cursor A Host', hostKey: 'cursor-a-host-key',
+    await stateModule.setRoom('DDD-EEE-FFF', {
+      name: 'Cursor B Host', cursor: 6, joinedAt: 345, hostKey: 'cursor-b-host-key',
     });
 
+    const harnessFiles = (await fs.readdir(dir)).filter((name) =>
+      name.startsWith('state-harness-cursor-'),
+    );
+    expect(harnessFiles).toHaveLength(2);
+
+    // A later restart without a real session identifier gets a fresh scope.
+    // It may recover neither process's host capability from merged state.
     await fs.rm(join(dir, `state-${process.ppid}.json`));
-    vi.stubEnv('CURSOR_AGENT', 'cursor-session-b');
     vi.resetModules();
     stateModule = await import('../src/state.js');
-    expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toBeUndefined();
+    expect(await stateModule.readRoomStateForSession('AAA-BBB-CCC')).toBeUndefined();
+    expect(await stateModule.readRoomStateForSession('DDD-EEE-FFF')).toBeUndefined();
   });
 
   it('never falls back to merged state for a detected harness without an id', async () => {
