@@ -18,6 +18,12 @@ ordering/concurrency contracts:
 - minutes/reports: create and read the immutable room snapshot;
 - receipts: append and deduplicate by a caller-supplied receipt id.
 
+The live turn lease remains an ephemeral Redis coordination primitive, but each
+lease transition is also appended through `appendLeaseEvent` as a receipt-class
+durable record. The closed event vocabulary is `granted`, `renewed`, `released`,
+`expired`, and `handoff_requested`. Build 3 and signed handoff receipts therefore
+read the one-pen-at-a-time history after the live lease itself has expired.
+
 The seam uses the shared domain types. It does not expose Redis commands, SQL,
 connection objects, or credentials. `createRoomPersistence(config)` is the only
 adapter-selection point. `AGENT_ROOM_PERSISTENCE=redis` is the default and uses
