@@ -114,24 +114,29 @@ describe('authenticated room join production entry', () => {
   });
 
   it.each([
-    'card declaration',
-    'selected join scheme',
-    'room configuration',
-  ] as const)('refuses an unknown runtime scheme at the %s boundary without a write', async boundary => {
+    {
+      label: 'card declaration', boundary: 'card_declaration', selected: 'oauth2',
+      cardSchemes: ['oauth2', 'apiKey'], roomSchemes: ['oauth2'],
+    },
+    {
+      label: 'selected join scheme', boundary: 'selected_join_scheme', selected: 'apiKey',
+      cardSchemes: ['oauth2', 'apiKey'], roomSchemes: ['oauth2'],
+    },
+    {
+      label: 'room configuration', boundary: 'room_configuration', selected: 'oauth2',
+      cardSchemes: ['oauth2'], roomSchemes: ['oauth2', 'apiKey'],
+    },
+  ] as const)('refuses an unknown runtime scheme at the $label boundary without a write', async fixture => {
     const keys = generateKeyPairSync('ed25519');
     const persistence = new MemoryPersistence();
     const validCard = card();
-    const unknownCard = {
+    const boundaryCard = {
       ...validCard,
-      securitySchemes: { apiKey: { type: 'apiKey' } },
-      security: ['apiKey'],
+      securitySchemes: Object.fromEntries(fixture.cardSchemes.map(scheme => [scheme, { type: scheme }])),
+      security: fixture.cardSchemes,
     } as unknown as AgentCard;
-    if (boundary === 'room configuration') {
-      persistence.current = {
-        ...persistence.current,
-        acceptedMemberAuthSchemes: ['apiKey'] as unknown as Room['acceptedMemberAuthSchemes'],
-      };
-    }
+    persistence.current = { ...persistence.current,
+      acceptedMemberAuthSchemes: fixture.roomSchemes as unknown as Room['acceptedMemberAuthSchemes'] };
     const join = new AuthenticatedRoomJoinServer(
       new RoomRecordServer(persistence),
       new AgentCardVerifier([{
@@ -139,16 +144,11 @@ describe('authenticated room join production entry', () => {
       }]),
       'required',
     );
-    const selected = boundary === 'selected join scheme'
-      ? 'apiKey' as unknown as 'oauth2'
-      : 'oauth2';
-    const selectedCard = boundary === 'card declaration' ? unknownCard : validCard;
-
     await expect(join.join(room().code, {
       participant,
-      scheme: selected,
-      signedCard: signAgentCard(selectedCard, 'key-1', keys.privateKey),
-    })).rejects.toMatchObject({ name: 'agent_card_scheme_not_accepted' });
+      scheme: fixture.selected as unknown as 'oauth2',
+      signedCard: signAgentCard(boundaryCard, 'key-1', keys.privateKey),
+    })).rejects.toMatchObject({ name: 'agent_card_scheme_not_accepted', boundary: fixture.boundary });
     expect(persistence.writes).toBe(0);
     expect(persistence.current.participants).toEqual([]);
   });

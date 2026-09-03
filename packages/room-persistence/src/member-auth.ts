@@ -18,12 +18,21 @@ export type MemberAuthMode = 'legacy' | 'required';
 
 export const MEMBER_AUTH_SCHEMES = ['oauth2', 'openIdConnect', 'mTLS'] as const;
 
-export function requireMemberAuthScheme(value: unknown): MemberAuthScheme {
+export type MemberAuthSchemeBoundary =
+  | 'card_declaration'
+  | 'selected_join_scheme'
+  | 'selected_verification_scheme'
+  | 'room_configuration';
+
+export function requireMemberAuthScheme(
+  value: unknown,
+  boundary: MemberAuthSchemeBoundary,
+): MemberAuthScheme {
   if (typeof value === 'string' && (MEMBER_AUTH_SCHEMES as readonly string[]).includes(value)) {
     return value as MemberAuthScheme;
   }
   throw new MemberJoinError('agent_card_scheme_not_accepted',
-    'Agent Card authentication scheme is outside the supported closed set.');
+    'Agent Card authentication scheme is outside the supported closed set.', boundary);
 }
 
 export interface AgentCard {
@@ -55,7 +64,7 @@ export interface AuthenticatedJoinInput {
 }
 
 export class MemberJoinError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly boundary?: MemberAuthSchemeBoundary) {
     super(message);
     this.name = code;
   }
@@ -113,9 +122,9 @@ export class AgentCardVerifier {
   }
 
   verify(signed: SignedAgentCard, scheme: MemberAuthScheme): AuthenticatedMemberIdentity {
-    const selectedScheme = requireMemberAuthScheme(scheme);
-    for (const declared of signed.card.security as unknown[]) requireMemberAuthScheme(declared);
-    for (const declared of Object.keys(signed.card.securitySchemes)) requireMemberAuthScheme(declared);
+    const selectedScheme = requireMemberAuthScheme(scheme, 'selected_verification_scheme');
+    for (const declared of signed.card.security as unknown[]) requireMemberAuthScheme(declared, 'card_declaration');
+    for (const declared of Object.keys(signed.card.securitySchemes)) requireMemberAuthScheme(declared, 'card_declaration');
     const header = parseProtected(signed.protected);
     if (header.alg !== 'EdDSA' || header.typ !== 'agent-card+jws' || !header.kid) {
       throw new MemberJoinError('agent_card_signature_invalid', 'Agent Card JWS header is not accepted.');
@@ -168,14 +177,14 @@ export class AuthenticatedRoomJoinServer {
     const room = await this.rooms.getRoom(code);
     if (!room || room.status !== 'active') throw new MemberJoinError('room_not_found', 'Room is not active.');
     const acceptedSchemes = (room.acceptedMemberAuthSchemes ?? [])
-      .map(value => requireMemberAuthScheme(value));
+      .map(value => requireMemberAuthScheme(value, 'room_configuration'));
     let identity: AuthenticatedMemberIdentity | undefined;
     if (!input.signedCard || !input.scheme) {
       if (this.mode === 'required') {
         throw new MemberJoinError('agent_card_required', 'This room requires a signed Agent Card.');
       }
     } else {
-      const selectedScheme = requireMemberAuthScheme(input.scheme);
+      const selectedScheme = requireMemberAuthScheme(input.scheme, 'selected_join_scheme');
       identity = this.verifier.verify(input.signedCard, selectedScheme);
       if (!acceptedSchemes.includes(selectedScheme)) {
         throw new MemberJoinError('agent_card_scheme_not_accepted', 'Room does not accept the selected Agent Card scheme.');
