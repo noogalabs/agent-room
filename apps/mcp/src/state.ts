@@ -348,8 +348,9 @@ export async function bumpBlockStreak(): Promise<number> {
 
 export async function bumpBlockStreakEverywhere(): Promise<number> {
   return withStateLock(async () => {
-    const next = ((await readMergedState()).blockStreak ?? 0) + 1;
-    const files = await listStateFiles();
+    const files = activeStateFiles();
+    const states = await Promise.all(files.map(readStateFile));
+    const next = Math.max(0, ...states.map((state) => state.blockStreak ?? 0)) + 1;
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       state.blockStreak = next;
@@ -370,7 +371,7 @@ export async function resetBlockStreak(): Promise<void> {
 
 export async function resetBlockStreakEverywhere(): Promise<void> {
   await withStateLock(async () => {
-    const files = await listStateFiles();
+    const files = activeStateFiles();
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       if (!state.blockStreak) return;

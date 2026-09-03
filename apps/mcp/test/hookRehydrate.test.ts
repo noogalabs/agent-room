@@ -141,4 +141,35 @@ describe('harness hook mutations stay in the active session', () => {
     expect(JSON.parse(readFileSync(runA, 'utf8')).rooms).toEqual({});
     expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
   });
+
+  it('block-streak bump and production prompt reset leave a second Codex session byte-identical', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-room-hook-streak-scope-'));
+    process.env.AGENT_ROOM_STATE_DIR = dir;
+    process.env.CODEX_RUN_ID = 'run-a';
+    process.env.CODEX_THREAD_ID = '';
+    delete process.env.AGENT_ROOM_STATE_FILE;
+    const runA = harnessFile(dir, 'run-a');
+    const runB = harnessFile(dir, 'run-b');
+    writeFileSync(runA, JSON.stringify({ version: 1, blockStreak: 0, rooms: {} }, null, 2));
+    writeFileSync(runB, JSON.stringify({ version: 1, blockStreak: 17, rooms: {} }, null, 2));
+    const runBBefore = readFileSync(runB, 'utf8');
+
+    vi.resetModules();
+    const state = await import('../src/state.js');
+    for (let index = 0; index < 60; index += 1) {
+      await state.bumpBlockStreakEverywhere();
+    }
+    expect(JSON.parse(readFileSync(runA, 'utf8')).blockStreak).toBe(60);
+    expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
+
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('synthetic offline'); }));
+    const exit = vi.spyOn(process, 'exit').mockImplementation((() => {
+      throw new Error('synthetic exit');
+    }) as never);
+    const { runHook } = await import('../src/hook.js');
+    await expect(runHook({ hook_event_name: 'UserPromptSubmit' })).rejects.toThrow('synthetic exit');
+    expect(exit).toHaveBeenCalledWith(0);
+    expect(JSON.parse(readFileSync(runA, 'utf8')).blockStreak).toBe(0);
+    expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
+  });
 });

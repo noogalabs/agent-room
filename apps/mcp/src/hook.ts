@@ -243,8 +243,8 @@ async function readStdin(): Promise<HookInput> {
   });
 }
 
-export async function runHook(): Promise<void> {
-  const input = await readStdin();
+export async function runHook(inputOverride?: HookInput): Promise<void> {
+  const input = inputOverride ?? await readStdin();
   // Normalize the event name across clients. Cursor only fires the stop
   // hook (no UserPromptSubmit / SessionStart equivalent today). Older
   // Cursor hook docs/examples showed `{ status, loop_count }` without a
