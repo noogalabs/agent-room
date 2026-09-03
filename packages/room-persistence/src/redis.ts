@@ -2,6 +2,7 @@ import { MAX_MESSAGES_PER_ROOM, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from '@agent-room/upstash-client';
 import type { LeaseEventInput, RoomPersistence, RoomReceipt } from './types.js';
+import { canonicalJson } from './json.js';
 
 const roomKey = (code: string): string => `room:${code}`;
 const messagesKey = (code: string): string => `room-msgs:${code}`;
@@ -140,7 +141,7 @@ export class RedisRoomPersistence implements RoomPersistence {
 
   async putMinutes(code: string, reportId: string, report: RoomReport): Promise<void> {
     await this.client.command([
-      'EVAL', MINUTES_SCRIPT, '1', minutesKey(code, reportId), JSON.stringify(report),
+      'EVAL', MINUTES_SCRIPT, '1', minutesKey(code, reportId), canonicalJson(report),
       reportId, String(ROOM_TTL_SECONDS),
     ]);
   }
@@ -155,7 +156,7 @@ export class RedisRoomPersistence implements RoomPersistence {
     const expiresAt = Math.floor(room.createdAt / 1000) + ROOM_TTL_SECONDS;
     const result = await this.client.command<number>([
       'EVAL', RECEIPT_SCRIPT, '2', receiptIdsKey(receipt.roomCode), receiptsKey(receipt.roomCode),
-      receipt.id, JSON.stringify(receipt), String(expiresAt),
+      receipt.id, canonicalJson(receipt), String(expiresAt),
     ]);
     return Number(result) === 1;
   }

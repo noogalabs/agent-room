@@ -49,6 +49,10 @@ its own seam.
 | Minutes/report | Redis snapshot with 24-hour TTL | Immutable snapshot retained with its room |
 | Receipts | Existing message/artifact representation and room TTL | Idempotent append keyed by `(room_id, receipt_id)` |
 
+Immutable minutes and receipt replays use one recursive canonical JSON encoding
+in both adapters, so top-level or nested object-key order cannot change whether
+the same payload is accepted as an idempotent retry.
+
 “Durable” means a committed record is visible after server-process restart and
 after a clock advance beyond 25 hours. It does not mean undeletable: explicit
 retention/deletion remains possible, auditable work outside this PR. Failed

@@ -2,6 +2,7 @@ import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { POSTGRES_SCHEMA_SQL } from './schema.js';
 import { PersistenceSchemaError, type LeaseEventInput, type RoomPersistence, type RoomReceipt } from './types.js';
+import { sameJson } from './json.js';
 
 const REQUIRED_SCHEMA_VERSION = 1;
 
@@ -11,22 +12,6 @@ function value<T>(raw: unknown): T {
 
 function count(result: QueryResult): number {
   return result.rowCount ?? 0;
-}
-
-function canonical(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonical);
-  if (value && typeof value === 'object') {
-    return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>)
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([key, item]) => [key, canonical(item)]),
-    );
-  }
-  return value;
-}
-
-function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
 export class PostgresRoomPersistence implements RoomPersistence {
