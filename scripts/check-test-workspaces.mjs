@@ -8,6 +8,7 @@ const EXPECTED_WORKSPACES = [
   'apps/mcp',
   'apps/starter',
   'apps/web',
+  'packages/room-persistence',
   'packages/shared',
   'packages/upstash-client',
 ];
