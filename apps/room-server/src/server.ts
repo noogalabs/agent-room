@@ -21,7 +21,7 @@ async function body(req: IncomingMessage): Promise<unknown> {
 }
 
 function error(res: ServerResponse, value: unknown): void {
-  const code = value instanceof MemberJoinError ? value.code : value instanceof Error ? value.message : 'internal_error';
+  const code = value instanceof MemberJoinError ? value.code : 'internal_error';
   const status = code === 'room_not_found' ? 404 : code === 'internal_error' ? 500 : 400;
   reply(res, status, { error: code });
 }
