@@ -44,6 +44,24 @@ async function listenHosted(hosted: Awaited<ReturnType<typeof createHostedRoomSe
   return `http://127.0.0.1:${address.port}`;
 }
 
+function hasUnrestrictedBuildContextInstruction(dockerfile: string): boolean {
+  return dockerfile.split(/\r?\n/).some(rawLine => {
+    const match = /^\s*(COPY|ADD)\s+(.+)$/i.exec(rawLine);
+    if (!match) return false;
+    let operands = match[2]!.trim();
+    while (operands.startsWith('--')) operands = operands.replace(/^--\S+\s+/, '');
+    let paths: string[];
+    if (operands.startsWith('[')) {
+      try { paths = JSON.parse(operands) as string[]; }
+      catch { return true; }
+    } else {
+      paths = operands.split(/\s+/);
+    }
+    const sources = paths.slice(0, -1);
+    return sources.some(source => source === '.' || source === './');
+  });
+}
+
 describe('hosted room production entry', () => {
   it('refuses every invalid trust store through the production entry before persistence or listen', async () => {
     const fromEnvironment = vi.spyOn(RoomRecordServer, 'fromEnvironment');
@@ -174,9 +192,15 @@ describe('hosted room production entry', () => {
     const entry = await readFile(new URL('apps/room-server/src/server.ts', root), 'utf8');
     expect(docker).toContain('CMD ["node", "apps/room-server/dist/index.js"]');
     expect(docker).not.toContain('apps/hosted-agent/dist/index.js');
-    expect(docker).not.toMatch(/^COPY\s+\.\s+\./m);
+    expect(hasUnrestrictedBuildContextInstruction(docker)).toBe(false);
+    for (const planted of ['COPY . /app', 'COPY ./ ./', 'ADD . .', 'COPY [".", "/app"]']) {
+      expect(hasUnrestrictedBuildContextInstruction(`${docker}\n${planted}`), planted).toBe(true);
+    }
     const dockerIgnore = await readFile(new URL('.dockerignore', root), 'utf8');
-    for (const pattern of ['**/.env', '**/.env.*', '**/*.jwk', '**/*.pem', '**/*.key']) {
+    for (const pattern of [
+      '**/.env', '**/.env.*', '**/*.jwk', '**/*.pem', '**/*.key',
+      '.env', '.env.*', '*.jwk', '*.pem', '*.key',
+    ]) {
       expect(dockerIgnore.split(/\r?\n/)).toContain(pattern);
     }
     expect(railway).toContain('apps/room-server/dist/index.js');

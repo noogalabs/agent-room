@@ -9,3 +9,8 @@ node_modules
 **/*.jwk
 **/*.pem
 **/*.key
+.env
+.env.*
+*.jwk
+*.pem
+*.key
