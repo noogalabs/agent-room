@@ -73,7 +73,7 @@ export class MemberJoinError extends Error {
 export function memberAuthModeFromEnvironment(
   env: Readonly<Record<string, string | undefined>>,
 ): MemberAuthMode {
-  const value = env.AGENT_ROOM_MEMBER_AUTH ?? 'legacy';
+  const value = env.AGENT_ROOM_MEMBER_AUTH ?? 'required';
   if (value === 'legacy' || value === 'required') return value;
   throw new MemberJoinError('member_auth_configuration_invalid',
     'AGENT_ROOM_MEMBER_AUTH must be legacy or required.');
@@ -169,7 +169,7 @@ export class AuthenticatedRoomJoinServer {
   constructor(
     private readonly rooms: RoomRecordServer,
     private readonly verifier: AgentCardVerifier,
-    private readonly mode: MemberAuthMode = 'legacy',
+    private readonly mode: MemberAuthMode = 'required',
     private readonly now: () => number = Date.now,
   ) {}
 

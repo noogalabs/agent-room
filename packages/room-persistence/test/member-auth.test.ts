@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { generateKeyPairSync, sign as signBytes } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { Room } from '@agent-room/shared';
 import type { RoomPersistence } from '../src/types.js';
@@ -25,6 +25,15 @@ function card(): AgentCard {
     securitySchemes: { oauth2: { type: 'oauth2' }, mTLS: { type: 'mutualTLS' } },
     security: ['oauth2', 'mTLS'],
   };
+}
+
+function canonical(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonical(item)]),
+  );
+  return value;
 }
 
 class MemoryPersistence implements RoomPersistence {
@@ -94,23 +103,51 @@ describe('authenticated room join production entry', () => {
     expect(persistence.writes).toBe(0);
   });
 
-  it('keeps legacy joins by default and refuses them when cards are required', async () => {
+  it('requires authenticated joins by default and enables legacy only explicitly', async () => {
     const keys = generateKeyPairSync('ed25519');
     const verifier = new AgentCardVerifier([{ fleetId: card().fleetId, keyId: 'key-1', publicKey: keys.publicKey }]);
     const legacyStore = new MemoryPersistence();
-    const legacy = new AuthenticatedRoomJoinServer(new RoomRecordServer(legacyStore), verifier);
+    const legacy = new AuthenticatedRoomJoinServer(new RoomRecordServer(legacyStore), verifier, 'legacy');
     expect((await legacy.join(room().code, { participant })).authenticatedIdentity).toBeUndefined();
     expect(legacyStore.writes).toBe(1);
 
     const requiredStore = new MemoryPersistence();
-    const required = new AuthenticatedRoomJoinServer(new RoomRecordServer(requiredStore), verifier, 'required');
+    const required = new AuthenticatedRoomJoinServer(new RoomRecordServer(requiredStore), verifier);
     await expect(required.join(room().code, { participant }))
       .rejects.toMatchObject({ name: 'agent_card_required' });
     expect(requiredStore.writes).toBe(0);
-    expect(memberAuthModeFromEnvironment({})).toBe('legacy');
+    expect(memberAuthModeFromEnvironment({})).toBe('required');
+    expect(memberAuthModeFromEnvironment({ AGENT_ROOM_MEMBER_AUTH: 'legacy' })).toBe('legacy');
     expect(memberAuthModeFromEnvironment({ AGENT_ROOM_MEMBER_AUTH: 'required' })).toBe('required');
     expect(() => memberAuthModeFromEnvironment({ AGENT_ROOM_MEMBER_AUTH: 'optional' }))
       .toThrow(/must be legacy or required/);
+  });
+
+  it('refuses an unknown Agent Card kid without falling back to another fleet key', () => {
+    const trusted = generateKeyPairSync('ed25519');
+    const signed = signAgentCard(card(), 'unknown-kid', trusted.privateKey);
+    const verifier = new AgentCardVerifier([
+      { fleetId: card().fleetId, keyId: 'trusted-kid', publicKey: trusted.publicKey },
+    ]);
+
+    expect(() => verifier.verify(signed, 'oauth2'))
+      .toThrowError(expect.objectContaining({ name: 'agent_card_signature_invalid' }));
+  });
+
+  it('refuses a non-EdDSA protected algorithm even when the signature bytes are present', () => {
+    const keys = generateKeyPairSync('ed25519');
+    const signed = signAgentCard(card(), 'key-1', keys.privateKey);
+    signed.protected = Buffer.from(JSON.stringify({ alg: 'none', kid: 'key-1', typ: 'agent-card+jws' }))
+      .toString('base64url');
+    signed.signature = signBytes(null, Buffer.from(
+      `${signed.protected}.${Buffer.from(JSON.stringify(canonical(signed.card))).toString('base64url')}`,
+    ), keys.privateKey).toString('base64url');
+    const verifier = new AgentCardVerifier([
+      { fleetId: card().fleetId, keyId: 'key-1', publicKey: keys.publicKey },
+    ]);
+
+    expect(() => verifier.verify(signed, 'oauth2'))
+      .toThrowError(expect.objectContaining({ name: 'agent_card_signature_invalid' }));
   });
 
   it.each([

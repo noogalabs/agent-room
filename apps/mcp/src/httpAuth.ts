@@ -1,7 +1,9 @@
 export interface McpFleetPrincipal {
   subject: string;
   fleetId: string;
+  issuer: string;
   audience: string;
+  expiresAt: number;
   scopes: readonly string[];
 }
 
@@ -43,6 +45,8 @@ export function createAuthorizedMcpHttpHandler(options: {
   metadataUrl: string;
   verifier: McpAccessTokenVerifier;
   dispatch: AuthorizedMcpHandler;
+  trustedIssuers: readonly string[];
+  now?: () => number;
 }): (request: McpHttpRequest) => Promise<McpHttpResponse> {
   return async request => {
     const header = request.headers.authorization;
@@ -56,7 +60,8 @@ export function createAuthorizedMcpHttpHandler(options: {
         resource: options.resource,
         requiredScope: 'agent-room:mcp',
       });
-      if (principal.audience !== options.resource || !principal.scopes.includes('agent-room:mcp')) {
+      if (!options.trustedIssuers.includes(principal.issuer) || principal.expiresAt <= (options.now?.() ?? Date.now()) ||
+        principal.audience !== options.resource || !principal.scopes.includes('agent-room:mcp')) {
         throw new Error('resource or scope mismatch');
       }
     } catch {
