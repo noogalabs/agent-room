@@ -9,7 +9,7 @@
   "scripts": {
     "test": "node scripts/check-test-workspaces.mjs && npm -ws run test",
     "build": "npm -ws run build --if-present",
-    "build:ordered": "npm run build -w packages/shared && npm run build -w packages/upstash-client && npm run build -w packages/room-persistence && npm run build -w apps/local-server && npm run build -w apps/hosted-agent && npm run build -w apps/mcp && npm run build -w apps/starter && npm run build -w apps/web",
+    "build:ordered": "npm run build -w packages/shared && npm run build -w packages/upstash-client && npm run build -w packages/room-persistence && npm run build -w apps/room-server && npm run build -w apps/local-server && npm run build -w apps/hosted-agent && npm run build -w apps/mcp && npm run build -w apps/starter && npm run build -w apps/web",
     "dev:web": "npm -w apps/web run dev"
   },
   "devDependencies": {
