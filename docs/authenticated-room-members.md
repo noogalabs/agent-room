@@ -33,3 +33,12 @@ References: [A2A Protocol specification](https://a2a-protocol.org/dev/specificat
 The production join entry gets four named casualties: a valid signed card joins and its binding survives persistence; a one-byte signature/card mutation is refused with no participant write; a valid card selecting a scheme the room does not accept is refused with no write; and legacy join succeeds under the default flag but is refused under `required`. Restored-defect kills must turn each applicable casualty red. HTTP MCP tests additionally prove a valid audience-and-scope token reaches dispatch and an invalid token cannot.
 
 Out of scope for build 2: running an authorization server, live OIDC/JWKS discovery, certificate issuance, dynamic registration, secret provisioning, deployment, cross-fleet `@` addressing (build 3), and live turn leases or signed handoff receipts (build 4).
+
+## Implementation receipt
+
+- `joins a valid card and keeps the fingerprint binding in the persistence seam`: green; removing the persisted `authenticatedIdentity` made it red by name.
+- `refuses a tampered signature before any participant write`: green; bypassing signature verification made it red by name.
+- `refuses a room-unaccepted scheme before any participant write`: green; bypassing the room scheme check made it red by name.
+- `keeps legacy joins by default and refuses them when cards are required`: green; bypassing the required-card flag made it red by name.
+- The Postgres integration drives the same production join entry and proves the binding survives a server restart. The HTTP MCP gate proves audience/scope verification, token stripping before dispatch, and a protected-resource `401` challenge.
+- Local rollup: 402 tests passed and 2 Postgres integration tests skipped without `TEST_POSTGRES_URL`; `npm run build:ordered` passed across all eight workspaces. Exact-head CI supplies the real Postgres leg.
