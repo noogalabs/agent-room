@@ -30,3 +30,12 @@ Two concurrent claims read the same board version, but only one compare-and-swap
 Five production-entry casualties bind the contract: two authenticated participants race and exactly one claim commits; a non-holder submission is refused with the board unchanged; renew extends while release frees; expiry frees and emits `expired`; a handoff reaches the holder and holder grant transfers atomically. The combined receipt assertion requires every emitted event in exact ledger order, including all five event kinds. Each restored defect must turn its named casualty red, then green at the frozen head. The ordered eight-workspace build, full rollup, and real-Postgres CI leg are required.
 
 Out of scope: file-glob overlap, git branch automation, cross-fleet `@` addressing, decision pins and signed handoff receipts (build 4), deployment, and secrets.
+
+## Implementation receipt
+
+- `atomically grants exactly one of two concurrent claims`: green; removing the held-lease conflict check made both contenders succeed and turned it red. The real-Postgres restart test repeats the race through the production persistence transaction.
+- `refuses a non-holder submission by name without changing the board`: green with holder-submit control; bypassing the holder comparison made it red.
+- `lets only the holder renew and release, extending from server time and freeing the task`: green; restoring a non-extending renewal made it red.
+- `sweeps expiry before claim and records expiry before the replacement grant`: green; disabling the expiry sweep made it red.
+- `routes a handoff to the holder and transfers its grant atomically with ordered ledger events`: green; retaining the old holder during grant made it red.
+- Redis uses one script for board CAS plus ordered ledger appends; Postgres uses one transaction. Local rollup: 408 passed and 3 Postgres tests skipped without `TEST_POSTGRES_URL`; `npm run build:ordered` passed across all eight workspaces. Exact-head CI supplies the real Postgres leg.
