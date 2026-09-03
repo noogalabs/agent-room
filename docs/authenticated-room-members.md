@@ -46,5 +46,5 @@ Out of scope for build 2: running an authorization server, live OIDC/JWKS discov
 - `refuses a tampered signature before any participant write`: green; bypassing signature verification made it red by name.
 - `refuses a room-unaccepted scheme before any participant write`: green; bypassing the room scheme check made it red by name.
 - `requires authenticated joins by default and enables legacy only explicitly`: green; restoring the legacy default made it red by name.
-- The Postgres integration drives the same production join entry and proves the binding survives a server restart. The HTTP MCP gate proves audience/scope verification, token stripping before dispatch, and a protected-resource `401` challenge.
+- The Postgres integration drives the same production join entry and proves the binding survives a server restart. The HTTP MCP gate proves audience, scope, issuer, and expiry verification, token stripping before dispatch, and a protected-resource `401` challenge.
 - Local rollup: 402 tests passed and 2 Postgres integration tests skipped without `TEST_POSTGRES_URL`; `npm run build:ordered` passed across all eight workspaces. Exact-head CI supplies the real Postgres leg.
