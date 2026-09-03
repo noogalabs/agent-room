@@ -33,5 +33,7 @@ jobs:
       - run: npm ci
       - name: Ordered workspace build
         run: npm run build:ordered
+      - name: Apply reviewed Postgres migration explicitly
+        run: npm run migrate:postgres -w packages/room-persistence
       - name: Workspace rollup with Postgres integration
         run: npm test

@@ -34,11 +34,31 @@ const BOARD_CAS_SCRIPT = [
 ].join('\n');
 
 const RECEIPT_SCRIPT = [
-  "if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return 0 end",
+  "if redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then",
+  "  local rows = redis.call('LRANGE', KEYS[2], 0, -1)",
+  '  for _, row in ipairs(rows) do',
+  '    local decoded = cjson.decode(row)',
+  '    if decoded.id == ARGV[1] then',
+  "      if row == ARGV[2] then return 0 end",
+  "      return redis.error_reply('Receipt id collision: ' .. ARGV[1])",
+  '    end',
+  '  end',
+  "  return redis.error_reply('Receipt id collision with missing payload: ' .. ARGV[1])",
+  'end',
   "redis.call('SADD', KEYS[1], ARGV[1])",
   "redis.call('RPUSH', KEYS[2], ARGV[2])",
   "redis.call('EXPIREAT', KEYS[1], tonumber(ARGV[3]))",
   "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[3]))",
+  'return 1',
+].join('\n');
+
+const MINUTES_SCRIPT = [
+  "local raw = redis.call('GET', KEYS[1])",
+  'if raw then',
+  '  if raw == ARGV[1] then return 0 end',
+  "  return redis.error_reply('Minutes id collision: ' .. ARGV[2])",
+  'end',
+  "redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[3]))",
   'return 1',
 ].join('\n');
 
@@ -120,7 +140,8 @@ export class RedisRoomPersistence implements RoomPersistence {
 
   async putMinutes(code: string, reportId: string, report: RoomReport): Promise<void> {
     await this.client.command([
-      'SET', minutesKey(code, reportId), JSON.stringify(report), 'EX', ROOM_TTL_SECONDS,
+      'EVAL', MINUTES_SCRIPT, '1', minutesKey(code, reportId), JSON.stringify(report),
+      reportId, String(ROOM_TTL_SECONDS),
     ]);
   }
 

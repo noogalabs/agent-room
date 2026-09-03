@@ -1,4 +1,9 @@
 export const POSTGRES_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS agent_room_schema_migrations (
+  version integer PRIMARY KEY,
+  applied_at bigint NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_room_rooms (
   code text PRIMARY KEY,
   topic text NOT NULL,
@@ -50,4 +55,8 @@ CREATE INDEX IF NOT EXISTS agent_room_messages_room_created_idx
   ON agent_room_messages(room_code, created_at);
 CREATE INDEX IF NOT EXISTS agent_room_receipts_room_created_idx
   ON agent_room_receipts(room_code, created_at);
+
+INSERT INTO agent_room_schema_migrations (version, applied_at)
+VALUES (1, (EXTRACT(EPOCH FROM clock_timestamp()) * 1000)::bigint)
+ON CONFLICT (version) DO NOTHING;
 `;

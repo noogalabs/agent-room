@@ -61,3 +61,10 @@ export class PersistenceConfigurationError extends Error {
     this.name = 'PersistenceConfigurationError';
   }
 }
+
+export class PersistenceSchemaError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PersistenceSchemaError';
+  }
+}

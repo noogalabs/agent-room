@@ -1,7 +1,9 @@
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { POSTGRES_SCHEMA_SQL } from './schema.js';
-import type { LeaseEventInput, RoomPersistence, RoomReceipt } from './types.js';
+import { PersistenceSchemaError, type LeaseEventInput, type RoomPersistence, type RoomReceipt } from './types.js';
+
+const REQUIRED_SCHEMA_VERSION = 1;
 
 function value<T>(raw: unknown): T {
   return (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
@@ -38,18 +40,38 @@ export class PostgresRoomPersistence implements RoomPersistence {
 
   static async connect(config: PoolConfig): Promise<PostgresRoomPersistence> {
     const store = new PostgresRoomPersistence(new Pool(config), true);
-    await store.migrate();
-    return store;
+    try {
+      await store.verifySchema();
+      return store;
+    } catch (error) {
+      await store.close();
+      throw error;
+    }
   }
 
-  static async fromPool(pool: Pool, migrate = true): Promise<PostgresRoomPersistence> {
+  static async fromPool(pool: Pool, verify = true): Promise<PostgresRoomPersistence> {
     const store = new PostgresRoomPersistence(pool, false);
-    if (migrate) await store.migrate();
+    if (verify) await store.verifySchema();
     return store;
   }
 
-  async migrate(): Promise<void> {
-    await this.pool.query(POSTGRES_SCHEMA_SQL);
+  private async verifySchema(): Promise<void> {
+    try {
+      const result = await this.pool.query<{ version: number }>(
+        'SELECT COALESCE(MAX(version), 0)::int AS version FROM agent_room_schema_migrations',
+      );
+      const version = Number(result.rows[0]?.version ?? 0);
+      if (version < REQUIRED_SCHEMA_VERSION) {
+        throw new PersistenceSchemaError(
+          `Postgres persistence schema is behind: expected ${REQUIRED_SCHEMA_VERSION}, found ${version}`,
+        );
+      }
+    } catch (error) {
+      if (error instanceof PersistenceSchemaError) throw error;
+      throw new PersistenceSchemaError(
+        `Postgres persistence schema is not migrated; run the explicit migration command (${String(error)})`,
+      );
+    }
   }
 
   async createRoom(room: Room): Promise<void> {
@@ -244,5 +266,14 @@ export class PostgresRoomPersistence implements RoomPersistence {
     } finally {
       client.release();
     }
+  }
+}
+
+export async function applyPostgresMigrations(config: PoolConfig): Promise<void> {
+  const pool = new Pool(config);
+  try {
+    await pool.query(POSTGRES_SCHEMA_SQL);
+  } finally {
+    await pool.end();
   }
 }

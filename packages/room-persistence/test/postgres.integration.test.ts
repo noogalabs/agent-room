@@ -2,6 +2,9 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool } from 'pg';
 import { RoomRecordServer } from '../src/server.js';
+import { PostgresRoomPersistence } from '../src/postgres.js';
+import { PersistenceSchemaError, type RoomReceipt } from '../src/types.js';
+import { proveImmutableRecordParity } from './parity-contract.js';
 
 const databaseUrl = process.env.TEST_POSTGRES_URL;
 const describePostgres = databaseUrl ? describe : describe.skip;
@@ -56,6 +59,34 @@ describePostgres('Postgres durable room production entry', () => {
     vi.useRealTimers();
     await first?.close();
     await admin?.end();
+  });
+
+  it('refuses an unmigrated schema without mutating it at connect time', async () => {
+    const schema = `unmigrated_${process.pid}_${Date.now()}`;
+    await admin.query(`CREATE SCHEMA ${schema}`);
+    try {
+      await expect(PostgresRoomPersistence.connect({
+        connectionString: databaseUrl,
+        options: `-c search_path=${schema}`,
+      })).rejects.toBeInstanceOf(PersistenceSchemaError);
+      const result = await admin.query<{ relation: string | null }>(
+        'SELECT to_regclass($1) AS relation',
+        [`${schema}.agent_room_rooms`],
+      );
+      expect(result.rows[0]?.relation).toBeNull();
+    } finally {
+      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
+    }
+  });
+
+  it('matches the Redis immutable minutes and receipt collision contract', async () => {
+    const parityRoom = { ...room(), code: 'PGS-PTY-234', topic: 'Synthetic parity room' };
+    const parityReport = { ...report(), code: parityRoom.code, topic: parityRoom.topic };
+    const parityReceipt: RoomReceipt = {
+      id: 'parity-receipt', roomCode: parityRoom.code, kind: 'receipt',
+      createdAt: 1_700_000_000_450, payload: { disposition: 'accepted' },
+    };
+    await proveImmutableRecordParity(first.persistence, parityRoom, parityReport, parityReceipt);
   });
 
   it('survives a server restart and a 25-hour clock skip with every durable record family', async () => {

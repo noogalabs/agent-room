@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { ROOM_TTL_SECONDS, type Message, type Room } from '@agent-room/shared';
+import { ROOM_TTL_SECONDS, type Message, type Room, type RoomReport } from '@agent-room/shared';
 import type { UpstashClient } from '@agent-room/upstash-client';
 import { RoomRecordServer } from '../src/server.js';
 import { RedisRoomPersistence } from '../src/redis.js';
+import type { RoomReceipt } from '../src/types.js';
+import { proveImmutableRecordParity } from './parity-contract.js';
 
 class RecordingRedis implements UpstashClient {
   readonly commands: Array<readonly (string | number)[]> = [];
@@ -63,6 +65,56 @@ class ExpiringRedis implements UpstashClient {
   }
 }
 
+class StatefulRedis implements UpstashClient {
+  private readonly values = new Map<string, string>();
+  private readonly receiptIds = new Set<string>();
+  private readonly lists = new Map<string, string[]>();
+
+  async command<T>(command: readonly (string | number)[]): Promise<T> {
+    const [name, rawKey] = command;
+    const key = String(rawKey);
+    if (name === 'SET') {
+      this.values.set(key, String(command[2]));
+      return 'OK' as T;
+    }
+    if (name === 'GET') return (this.values.get(key) ?? null) as T;
+    if (name === 'LRANGE') return (this.lists.get(key) ?? []) as T;
+    if (name === 'EVAL') {
+      const script = String(command[1]);
+      if (script.includes('Minutes id collision')) {
+        const minutesKey = String(command[3]);
+        const payload = String(command[4]);
+        const reportId = String(command[5]);
+        const existing = this.values.get(minutesKey);
+        if (existing === payload) return 0 as T;
+        if (existing !== undefined) throw new Error(`Minutes id collision: ${reportId}`);
+        this.values.set(minutesKey, payload);
+        return 1 as T;
+      }
+      if (script.includes('Receipt id collision')) {
+        const idsKey = String(command[3]);
+        const listKey = String(command[4]);
+        const id = String(command[5]);
+        const payload = String(command[6]);
+        const compositeId = `${idsKey}:${id}`;
+        if (this.receiptIds.has(compositeId)) {
+          const existing = (this.lists.get(listKey) ?? []).find(row => JSON.parse(row).id === id);
+          if (existing === payload) return 0 as T;
+          throw new Error(`Receipt id collision: ${id}`);
+        }
+        this.receiptIds.add(compositeId);
+        this.lists.set(listKey, [...(this.lists.get(listKey) ?? []), payload]);
+        return 1 as T;
+      }
+    }
+    throw new Error(`Unsupported fake command ${String(name)}`);
+  }
+
+  async pipeline<T>(_commands: readonly (readonly (string | number)[])[]): Promise<T[]> {
+    return [];
+  }
+}
+
 function room(): Room {
   return {
     code: 'ABC-DEF-GHJ', topic: 'Synthetic room', createdAt: 1_700_000_000_000,
@@ -74,6 +126,21 @@ function message(): Message {
   return {
     id: 1_700_000_000_100, type: 'msg', name: 'Agent', initials: 'AG', color: '#000',
     role: 'builder', text: 'synthetic message', client: 'cc', time: 1_700_000_000_100,
+  };
+}
+
+function report(): RoomReport {
+  return {
+    code: room().code, topic: room().topic, createdAt: room().createdAt,
+    exportedAt: 1_700_000_000_300, participants: [], messageCount: 0,
+    summary: 'Synthetic minutes', highlights: [], decisions: [], actionItems: [], artifacts: [], transcript: [],
+  };
+}
+
+function receipt(): RoomReceipt {
+  return {
+    id: 'receipt-1', roomCode: room().code, kind: 'receipt',
+    createdAt: 1_700_000_000_400, payload: { disposition: 'accepted' },
   };
 }
 
@@ -121,5 +188,10 @@ describe('RedisRoomPersistence compatibility', () => {
       { AGENT_ROOM_PERSISTENCE: 'mystery' },
       { redisClient: new RecordingRedis() },
     )).rejects.toThrow(/must be redis or postgres/);
+  });
+
+  it('matches the durable adapter collision contract for minutes and receipts', async () => {
+    const store = new RedisRoomPersistence(new StatefulRedis());
+    await proveImmutableRecordParity(store, room(), report(), receipt());
   });
 });
