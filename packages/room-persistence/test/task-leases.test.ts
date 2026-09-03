@@ -145,4 +145,48 @@ describe('task lease production entry', () => {
     expect(store.receipts.map(item => item.leaseEvent)).toEqual(['granted', 'handoff_requested', 'granted']);
     expect(store.receipts[1]?.payload).toMatchObject({ routedTo: alice.memberId });
   });
+
+  it('refuses a handoff grant when its recipient is no longer an active authenticated member', async () => {
+    const store = new LeaseMemoryPersistence();
+    const clock = { now: 100 };
+    const leases = service(store, clock);
+    await leases.claim(room().code, 'T-01', alice);
+    await leases.requestHandoff(room().code, 'T-01', bob);
+    const before = structuredClone(store.currentBoard);
+    store.currentRoom = { ...store.currentRoom,
+      participants: store.currentRoom.participants.filter(item => item.name !== bob.name) };
+
+    await expect(leases.grantHandoff(room().code, 'T-01', alice))
+      .rejects.toMatchObject({ name: 'task_lease_authenticated_member_required' });
+    expect(store.currentBoard).toEqual(before);
+    expect(store.receipts.at(-1)).toMatchObject({
+      kind: 'receipt',
+      payload: {
+        disposition: 'refused',
+        reason: 'task_lease_authenticated_member_required',
+        requestedById: bob.memberId,
+      },
+    });
+  });
+
+  it.each([
+    ['renew', (leases: TaskLeaseServer) => leases.renew(room().code, 'T-01', alice),
+      'task_lease_holder_required'],
+    ['release', (leases: TaskLeaseServer) => leases.release(room().code, 'T-01', alice),
+      'task_lease_holder_required'],
+    ['requestHandoff', (leases: TaskLeaseServer) => leases.requestHandoff(room().code, 'T-01', bob),
+      'task_lease_not_active'],
+    ['submit', (leases: TaskLeaseServer) => leases.submit(room().code, 'T-01', alice, evidence),
+      'task_lease_holder_required'],
+  ] as const)('persists lazy expiry before a rejected %s operation', async (_name, operate, errorName) => {
+    const store = new LeaseMemoryPersistence();
+    const clock = { now: 100 };
+    const leases = service(store, clock);
+    await leases.claim(room().code, 'T-01', alice, 10);
+    clock.now = 111;
+
+    await expect(operate(leases)).rejects.toMatchObject({ name: errorName });
+    expect(store.currentBoard.tasks[0]?.lease?.status).toBe('expired');
+    expect(store.receipts.map(item => item.leaseEvent)).toEqual(['granted', 'expired']);
+  });
 });

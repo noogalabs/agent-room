@@ -22,12 +22,12 @@ Two concurrent claims read the same board version, but only one compare-and-swap
 - `renew`: holder-only; replaces `expiresAt` with `now + ttl`, rather than extending stale time.
 - `release`: holder-only; closes the lease and makes the task claimable.
 - `requestHandoff`: a non-holder records one pending request addressed to the current holder. It does not steal or release the lease.
-- `grantHandoff`: holder-only; atomically replaces the holder with the named authenticated requester, clears the request, resets the TTL, and records the new `granted` event with transfer context.
+- `grantHandoff`: holder-only; re-validates the named requester as an active authenticated participant at grant time, then atomically replaces the holder, clears the request, resets the TTL, and records the new `granted` event with transfer context. A departed or unauthenticated recipient is refused by name, leaves the board unchanged, and writes a refusal receipt to the durable ledger.
 - `submit`: if a task has an active lease, the production task submission entry compares the caller's authenticated fingerprint to `holderId`. A mismatch fails by name as `task_lease_holder_required` before evidence or board state can change. Expiry is swept first, so an expired lease no longer authorizes its former holder.
 
 ## Proof and scope
 
-Five production-entry casualties bind the contract: two authenticated participants race and exactly one claim commits; a non-holder submission is refused with the board unchanged; renew extends while release frees; expiry frees and emits `expired`; a handoff reaches the holder and holder grant transfers atomically. The combined receipt assertion requires every emitted event in exact ledger order, including all five event kinds. Each restored defect must turn its named casualty red, then green at the frozen head. The ordered eight-workspace build, full rollup, and real-Postgres CI leg are required.
+Production-entry casualties bind the contract: two authenticated participants race and exactly one claim commits; a non-holder submission is refused with the board unchanged; renew extends while release frees; expiry frees and emits `expired`; a handoff reaches the holder and holder grant transfers atomically; a departed handoff recipient is refused with a durable receipt; and renew, release, handoff request, and submit each persist lazy expiry before reporting their own rejected precondition. The combined receipt assertions require every emitted event in exact ledger order, including all five event kinds. Each restored defect must turn its named casualty red, then green at the frozen head. The ordered eight-workspace build, full rollup, and real-Postgres CI leg are required.
 
 Out of scope: file-glob overlap, git branch automation, cross-fleet `@` addressing, decision pins and signed handoff receipts (build 4), deployment, and secrets.
 

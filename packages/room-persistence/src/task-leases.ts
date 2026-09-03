@@ -70,7 +70,7 @@ export class TaskLeaseServer {
     return ttl;
   }
 
-  private expired(task: Task, at: number, eventId: string, actor: LeaseActor): {
+  private expired(task: Task, at: number, makeEventId: () => string, actor: LeaseActor): {
     task: Task;
     events: LeaseEventInput[];
   } {
@@ -80,7 +80,7 @@ export class TaskLeaseServer {
     const lease: TaskLease = { ...task.lease, status: 'expired', releasedAt: at, handoff: undefined };
     return {
       task: { ...task, lease, updatedAt: at },
-      events: [this.event(eventId, task.id, lease, 'expired', actor, at)],
+      events: [this.event(makeEventId(), task.id, lease, 'expired', actor, at)],
     };
   }
 
@@ -103,7 +103,8 @@ export class TaskLeaseServer {
     code: string,
     taskId: string,
     actor: LeaseActor,
-    operation: (task: Task, at: number, makeEventId: () => string) => { task: Task; events: LeaseEventInput[] },
+    operation: (task: Task, at: number, makeEventId: () => string) =>
+      { task: Task; events: LeaseEventInput[] } | Promise<{ task: Task; events: LeaseEventInput[] }>,
   ): Promise<{ board: TaskBoard; task: Task }> {
     await this.authenticatedActor(code, actor);
     const operationId = this.newId();
@@ -118,9 +119,22 @@ export class TaskLeaseServer {
       const board = await this.records.getTaskBoard(code);
       if (!board) throw new TaskLeaseError('task_board_not_found', 'Task board was not found.');
       const at = this.now();
-      const result = operation(taskAt(board, taskId), at, makeEventId);
+      const swept = this.expired(taskAt(board, taskId), at, makeEventId, actor);
+      let result: { task: Task; events: LeaseEventInput[] };
+      try {
+        result = await operation(swept.task, at, makeEventId);
+      } catch (error) {
+        if (swept.events.length === 0) throw error;
+        const expiredBoard = withTask(board, swept.task, at);
+        const expiryEvents = swept.events.map(event => ({ ...event, roomCode: code }));
+        if (await this.records.updateTaskBoardWithLeaseEvents(
+          code, board.version, expiredBoard, expiryEvents,
+        )) throw error;
+        continue;
+      }
       const next = withTask(board, result.task, at);
-      const events = result.events.map(event => ({ ...event, roomCode: code }));
+      const events = [...swept.events, ...result.events]
+        .map(event => ({ ...event, roomCode: code }));
       if (await this.records.updateTaskBoardWithLeaseEvents(code, board.version, next, events)) {
         return { board: next, task: result.task };
       }
@@ -131,53 +145,49 @@ export class TaskLeaseServer {
   claim(code: string, taskId: string, actor: LeaseActor, ttlMs?: number) {
     const ttl = this.ttl(ttlMs);
     const leaseId = `task-lease-${this.newId()}`;
-    return this.mutate(code, taskId, actor, (original, at, eventId) => {
-      const swept = this.expired(original, at, eventId(), actor);
-      if (swept.task.lease?.status === 'active') {
-        throw new TaskLeaseError('task_lease_held', `Task lease is held by ${swept.task.lease.holderName}.`);
+    return this.mutate(code, taskId, actor, (task, at, eventId) => {
+      if (task.lease?.status === 'active') {
+        throw new TaskLeaseError('task_lease_held', `Task lease is held by ${task.lease.holderName}.`);
       }
       const lease: TaskLease = {
         id: leaseId, holderId: actor.memberId, holderName: actor.name, holderClient: actor.client,
         status: 'active', grantedAt: at, expiresAt: at + ttl,
       };
       return {
-        task: { ...swept.task, lease, updatedAt: at },
-        events: [...swept.events, this.event(eventId(), taskId, lease, 'granted', actor, at)],
+        task: { ...task, lease, updatedAt: at },
+        events: [this.event(eventId(), taskId, lease, 'granted', actor, at)],
       };
     });
   }
 
   renew(code: string, taskId: string, actor: LeaseActor, ttlMs?: number) {
     const ttl = this.ttl(ttlMs);
-    return this.mutate(code, taskId, actor, (original, at, eventId) => {
-      const swept = this.expired(original, at, eventId(), actor);
-      const lease = swept.task.lease;
+    return this.mutate(code, taskId, actor, (task, at, eventId) => {
+      const lease = task.lease;
       if (!lease || lease.status !== 'active' || lease.holderId !== actor.memberId) {
         throw new TaskLeaseError('task_lease_holder_required', 'Only the active lease holder may renew.');
       }
       const renewed: TaskLease = { ...lease, renewedAt: at, expiresAt: at + ttl };
-      return { task: { ...swept.task, lease: renewed, updatedAt: at },
-        events: [...swept.events, this.event(eventId(), taskId, renewed, 'renewed', actor, at)] };
+      return { task: { ...task, lease: renewed, updatedAt: at },
+        events: [this.event(eventId(), taskId, renewed, 'renewed', actor, at)] };
     });
   }
 
   release(code: string, taskId: string, actor: LeaseActor) {
-    return this.mutate(code, taskId, actor, (original, at, eventId) => {
-      const swept = this.expired(original, at, eventId(), actor);
-      const lease = swept.task.lease;
+    return this.mutate(code, taskId, actor, (task, at, eventId) => {
+      const lease = task.lease;
       if (!lease || lease.status !== 'active' || lease.holderId !== actor.memberId) {
         throw new TaskLeaseError('task_lease_holder_required', 'Only the active lease holder may release.');
       }
       const released: TaskLease = { ...lease, status: 'released', releasedAt: at, handoff: undefined };
-      return { task: { ...swept.task, lease: released, updatedAt: at },
-        events: [...swept.events, this.event(eventId(), taskId, released, 'released', actor, at)] };
+      return { task: { ...task, lease: released, updatedAt: at },
+        events: [this.event(eventId(), taskId, released, 'released', actor, at)] };
     });
   }
 
   requestHandoff(code: string, taskId: string, actor: LeaseActor) {
-    return this.mutate(code, taskId, actor, (original, at, eventId) => {
-      const swept = this.expired(original, at, eventId(), actor);
-      const lease = swept.task.lease;
+    return this.mutate(code, taskId, actor, (task, at, eventId) => {
+      const lease = task.lease;
       if (!lease || lease.status !== 'active') {
         throw new TaskLeaseError('task_lease_not_active', 'Task has no active lease holder.');
       }
@@ -188,21 +198,42 @@ export class TaskLeaseServer {
         requestedById: actor.memberId, requestedByName: actor.name,
         requestedByClient: actor.client, requestedAt: at,
       } };
-      return { task: { ...swept.task, lease: requested, updatedAt: at },
-        events: [...swept.events, this.event(eventId(), taskId, requested, 'handoff_requested', actor, at,
+      return { task: { ...task, lease: requested, updatedAt: at },
+        events: [this.event(eventId(), taskId, requested, 'handoff_requested', actor, at,
           { routedTo: lease.holderId })] };
     });
   }
 
   grantHandoff(code: string, taskId: string, actor: LeaseActor, ttlMs?: number) {
     const ttl = this.ttl(ttlMs);
-    return this.mutate(code, taskId, actor, (original, at, eventId) => {
-      const swept = this.expired(original, at, eventId(), actor);
-      const lease = swept.task.lease;
+    return this.mutate(code, taskId, actor, async (task, at, eventId) => {
+      const lease = task.lease;
       if (!lease || lease.status !== 'active' || lease.holderId !== actor.memberId) {
         throw new TaskLeaseError('task_lease_holder_required', 'Only the active holder may grant a handoff.');
       }
       if (!lease.handoff) throw new TaskLeaseError('task_lease_handoff_missing', 'No handoff is pending.');
+      try {
+        await this.authenticatedActor(code, {
+          memberId: lease.handoff.requestedById,
+          name: lease.handoff.requestedByName,
+          client: lease.handoff.requestedByClient,
+        });
+      } catch (error) {
+        await this.records.appendReceipt({
+          id: `handoff-refusal-${eventId()}`,
+          roomCode: code,
+          kind: 'receipt',
+          createdAt: at,
+          payload: {
+            disposition: 'refused',
+            reason: 'task_lease_authenticated_member_required',
+            taskId,
+            requestedById: lease.handoff.requestedById,
+            holderId: actor.memberId,
+          },
+        });
+        throw error;
+      }
       const transferred: TaskLease = {
         ...lease,
         holderId: lease.handoff.requestedById,
@@ -214,8 +245,8 @@ export class TaskLeaseServer {
         releasedAt: undefined,
         handoff: undefined,
       };
-      return { task: { ...swept.task, lease: transferred, updatedAt: at },
-        events: [...swept.events, this.event(eventId(), taskId, transferred, 'granted', actor, at,
+      return { task: { ...task, lease: transferred, updatedAt: at },
+        events: [this.event(eventId(), taskId, transferred, 'granted', actor, at,
           { transferredFrom: actor.memberId })] };
     });
   }
@@ -225,16 +256,15 @@ export class TaskLeaseServer {
       !evidence.runOutput.trim() || !Number.isInteger(evidence.exitCode)) {
       throw new TaskLeaseError('task_evidence_invalid', 'Task evidence must contain all proof fields and an exit code.');
     }
-    return this.mutate(code, taskId, actor, (original, at, eventId) => {
-      const swept = this.expired(original, at, eventId(), actor);
-      const lease = swept.task.lease;
+    return this.mutate(code, taskId, actor, (task, at) => {
+      const lease = task.lease;
       if (lease && (lease.status !== 'active' || lease.holderId !== actor.memberId)) {
         throw new TaskLeaseError('task_lease_holder_required',
           'Only the active lease holder may submit changes to this task.');
       }
-      const task: Task = { ...swept.task, state: 'awaiting_review', updatedAt: at,
+      const submitted: Task = { ...task, state: 'awaiting_review', updatedAt: at,
         evidence: { ...evidence, submittedBy: actor.name, submittedClient: actor.client, at } };
-      return { task, events: swept.events };
+      return { task: submitted, events: [] };
     });
   }
 }
