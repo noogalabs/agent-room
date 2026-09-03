@@ -213,7 +213,7 @@ function formatMessages(rooms: PendingRoom[]): string {
   return lines.join('\n');
 }
 
-async function commitCursors(rooms: PendingRoom[], scope: StateScope): Promise<void> {
+export async function commitCursors(rooms: PendingRoom[], scope: StateScope): Promise<void> {
   for (const r of rooms) {
     if (scope === 'harness') {
       await updateCursorEverywhere(r.code, r.newCursor);

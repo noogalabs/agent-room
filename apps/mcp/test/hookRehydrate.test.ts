@@ -102,3 +102,43 @@ describe('Stop cleanup keeps live rooms through outages', () => {
     expect(rooms).toEqual([]);
   });
 });
+
+describe('harness hook mutations stay in the active session', () => {
+  it('cursor commit and room removal leave a second Codex session byte-identical', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'agent-room-hook-session-scope-'));
+    process.env.AGENT_ROOM_STATE_DIR = dir;
+    process.env.CODEX_RUN_ID = 'run-a';
+    process.env.CODEX_THREAD_ID = '';
+    delete process.env.AGENT_ROOM_STATE_FILE;
+    const code = 'ABC-DEF-GHJ';
+    const runA = harnessFile(dir, 'run-a');
+    const runB = harnessFile(dir, 'run-b');
+    const room = (name: string, cursor: number) => ({
+      version: 1,
+      blockStreak: 0,
+      rooms: { [code]: {
+        name, cursor, joinedAt: 1,
+        accessToken: 'a'.repeat(43), participantToken: 'p'.repeat(43),
+      } },
+    });
+    writeFileSync(runA, JSON.stringify(room('Session A', 2), null, 2));
+    writeFileSync(runB, JSON.stringify(room('Session B', 9), null, 2));
+    const runBBefore = readFileSync(runB, 'utf8');
+
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: 'room_access_denied', message: 'Room access denied.',
+    }), { status: 403, headers: { 'content-type': 'application/json' } })));
+    vi.resetModules();
+    const { commitCursors, pruneRoomsForStop } = await import('../src/hook.js');
+
+    await commitCursors([{
+      code, topic: 'Synthetic', selfName: 'Session A', newCursor: 7, messages: [],
+    }], 'harness');
+    expect(JSON.parse(readFileSync(runA, 'utf8')).rooms[code].cursor).toBe(7);
+    expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
+
+    await pruneRoomsForStop('harness');
+    expect(JSON.parse(readFileSync(runA, 'utf8')).rooms).toEqual({});
+    expect(readFileSync(runB, 'utf8')).toBe(runBBefore);
+  });
+});

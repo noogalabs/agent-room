@@ -138,6 +138,13 @@ async function listStateFiles(): Promise<string[]> {
   return Array.from(new Set([...files, STATE_FILE, currentHarnessStateFile()].filter(Boolean) as string[]));
 }
 
+/** Files owned by this process and its current durable harness session only. */
+function activeStateFiles(): string[] {
+  return Array.from(new Set(
+    [STATE_FILE, currentHarnessStateFile()].filter(Boolean) as string[],
+  ));
+}
+
 export async function readMergedState(): Promise<AgentRoomState> {
   const files = await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
@@ -309,7 +316,7 @@ export async function updateCursor(code: string, cursor: number): Promise<void> 
 
 export async function updateCursorEverywhere(code: string, cursor: number): Promise<void> {
   await withStateLock(async () => {
-    const files = await listStateFiles();
+    const files = activeStateFiles();
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       const room = state.rooms[code];
@@ -375,7 +382,7 @@ export async function resetBlockStreakEverywhere(): Promise<void> {
 
 export async function removeRoomEverywhere(code: string): Promise<void> {
   await withStateLock(async () => {
-    const files = await listStateFiles();
+    const files = activeStateFiles();
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       if (!(code in state.rooms)) return;
