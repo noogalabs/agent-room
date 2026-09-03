@@ -51,7 +51,7 @@ describePostgres('Postgres durable room production entry', () => {
   beforeAll(async () => {
     admin = new Pool({ connectionString: databaseUrl });
     first = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     // Synthetic CI database dedicated to this job; clearing it makes retries deterministic.
     await admin.query(`TRUNCATE agent_room_receipts, agent_room_minutes, agent_room_task_boards,
@@ -114,7 +114,7 @@ describePostgres('Postgres durable room production entry', () => {
     vi.useFakeTimers();
     vi.setSystemTime(room().createdAt + 25 * 60 * 60 * 1000);
     const restarted = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     try {
       expect(await restarted.getRoom(room().code)).toEqual(room());
@@ -149,7 +149,7 @@ describePostgres('Postgres durable room production entry', () => {
   it('retains an authenticated member binding across a Postgres server restart', async () => {
     vi.useRealTimers();
     const server = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     const durableRoom: Room = {
       ...room(), code: 'PGS-AUT-MEM', version: 1, participants: [],
@@ -171,7 +171,7 @@ describePostgres('Postgres durable room production entry', () => {
     await server.close();
 
     const restarted = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     try {
       expect((await restarted.getRoom(durableRoom.code))?.participants).toEqual([participant]);
@@ -184,7 +184,7 @@ describePostgres('Postgres durable room production entry', () => {
   it('atomically persists a task lease and its ledger event across restart', async () => {
     vi.useRealTimers();
     const server = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     const actor = { memberId: 'fingerprint-lease-ci-a', name: 'Lease Agent A', client: 'cc' as const };
     const contender = { memberId: 'fingerprint-lease-ci-b', name: 'Lease Agent B', client: 'cc' as const };
@@ -217,7 +217,7 @@ describePostgres('Postgres durable room production entry', () => {
     await server.close();
 
     const restarted = await RoomRecordServer.fromEnvironment({
-      AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     try {
       expect((await restarted.getTaskBoard(durableRoom.code))?.tasks[0]?.lease)
@@ -233,7 +233,7 @@ describePostgres('Postgres durable room production entry', () => {
     'keeps Postgres %s membership atomic when the member leaves at commit', async operation => {
       vi.useRealTimers();
       const server = await RoomRecordServer.fromEnvironment({
-        AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
+        AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
       });
       const alice = { memberId: `pg-${operation}-alice`, name: 'Atomic Alice', client: 'cc' as const };
       const bob = { memberId: `pg-${operation}-bob`, name: 'Atomic Bob', client: 'cc' as const };
