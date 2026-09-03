@@ -1,6 +1,7 @@
 import { promises as fs } from 'fs';
+import { createHash, randomUUID } from 'crypto';
 import { homedir } from 'os';
-import { join, dirname } from 'path';
+import { basename, join, dirname } from 'path';
 import { detectHarness } from './harness.js';
 
 const STATE_DIR = process.env.AGENT_ROOM_STATE_DIR || join(homedir(), '.agent-room');
@@ -17,11 +18,26 @@ const STATE_FILE =
   process.env.AGENT_ROOM_STATE_FILE ||
   join(STATE_DIR, `state-${process.ppid ?? process.pid}.json`);
 
+// A detected harness without a stable session identifier must still stay out
+// of merged state. This nonce deliberately lasts only for this MCP process:
+// isolation is safer than guessing that another session's credentials belong
+// to the caller.
+const HARNESS_PROCESS_NONCE = randomUUID();
+
+function currentHarnessSessionId(kind: 'cursor' | 'codex'): string {
+  if (kind === 'codex') {
+    return process.env.CODEX_THREAD_ID || process.env.CODEX_RUN_ID || HARNESS_PROCESS_NONCE;
+  }
+  return process.env.CURSOR_TRACE_ID || HARNESS_PROCESS_NONCE;
+}
+
 function currentHarnessStateFile(): string | null {
   if (process.env.AGENT_ROOM_STATE_FILE) return null;
   const kind = detectHarness().kind;
   if (kind !== 'cursor' && kind !== 'codex') return null;
-  return join(STATE_DIR, `state-harness-${kind}.json`);
+  const sessionId = currentHarnessSessionId(kind);
+  const scope = createHash('sha256').update(sessionId).digest('hex').slice(0, 16);
+  return join(STATE_DIR, `state-harness-${kind}-${scope}.json`);
 }
 
 export interface RoomState {
@@ -113,7 +129,7 @@ async function listStateFiles(): Promise<string[]> {
   try {
     const entries = await fs.readdir(STATE_DIR);
     files = entries
-      .filter((name) => /^state-(?:\d+|harness-[a-z-]+)\.json$/.test(name))
+      .filter((name) => /^state-(?:\d+|harness-[a-z-]+-[a-f0-9]{16})\.json$/.test(name))
       .map((name) => join(STATE_DIR, name));
   } catch {
     files = [];
@@ -122,8 +138,18 @@ async function listStateFiles(): Promise<string[]> {
   return Array.from(new Set([...files, STATE_FILE, currentHarnessStateFile()].filter(Boolean) as string[]));
 }
 
+/** Files owned by this process and its current durable harness session only. */
+function activeStateFiles(): string[] {
+  return Array.from(new Set(
+    [STATE_FILE, currentHarnessStateFile()].filter(Boolean) as string[],
+  ));
+}
+
 export async function readMergedState(): Promise<AgentRoomState> {
-  const files = await listStateFiles();
+  const kind = detectHarness().kind;
+  const files = kind === 'cursor' || kind === 'codex'
+    ? activeStateFiles()
+    : await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
   return mergeStates(states);
 }
@@ -142,8 +168,10 @@ export async function readRoomStateForCredentials(code: string): Promise<RoomSta
   const candidates = states
     .map((state) => state.rooms[code])
     .filter((room): room is RoomState => Boolean(room));
-  const knownIdentities = new Set(candidates.map((room) => `${room.name}\0${room.client ?? 'cc'}`));
-  const identity = current ?? harness ?? (knownIdentities.size === 1 ? candidates[0] : undefined);
+  // Cursor/Codex recovery is scoped to the actual run id. A globally unique
+  // participant in some other run is still foreign and must never become this
+  // session's host identity.
+  const identity = current ?? harness;
   if (!identity) return undefined;
 
   const matches = states
@@ -157,16 +185,34 @@ export async function readRoomStateForCredentials(code: string): Promise<RoomSta
   if (!preferred) return undefined;
   return {
     ...preferred,
+    cursor: Math.max(...sources.map((room) => room.cursor)),
+    lastSentAt: Math.max(...sources.map((room) => room.lastSentAt ?? 0)) || undefined,
+    hostKey: sources.find((room) => room.hostKey)?.hostKey,
     accessToken: sources.find((room) => room.accessToken)?.accessToken,
     participantToken: sources.find((room) => room.participantToken)?.participantToken,
   };
+}
+
+/**
+ * Resolve interactive tool identity without crossing ordinary PPID sessions.
+ * Cursor and Codex need the durable harness recovery path because their MCP
+ * process identity changes across restarts; other harnesses share the current
+ * PPID state file and must never inherit a foreign session's host capability.
+ */
+export async function readRoomStateForSession(code: string): Promise<RoomState | undefined> {
+  const kind = detectHarness().kind;
+  if (kind === 'cursor' || kind === 'codex') return readRoomStateForCredentials(code);
+  return (await readState()).rooms[code];
 }
 
 export async function readRoomStateForJoin(code: string, desiredName: string): Promise<RoomState | undefined> {
   const current = (await readState()).rooms[code];
   if (current) return current;
 
-  const files = await listStateFiles();
+  const kind = detectHarness().kind;
+  const files = kind === 'cursor' || kind === 'codex'
+    ? activeStateFiles()
+    : await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
   return states
     .map((state) => state.rooms[code])
@@ -177,8 +223,7 @@ export async function readRoomStateForJoin(code: string, desiredName: string): P
 export async function readHarnessStateOrMerged(): Promise<AgentRoomState> {
   const harnessFile = currentHarnessStateFile();
   if (harnessFile) {
-    const harnessState = await readStateFile(harnessFile);
-    if (Object.keys(harnessState.rooms).length > 0) return harnessState;
+    return readStateFile(harnessFile);
   }
   return readMergedState();
 }
@@ -277,7 +322,7 @@ export async function updateCursor(code: string, cursor: number): Promise<void> 
 
 export async function updateCursorEverywhere(code: string, cursor: number): Promise<void> {
   await withStateLock(async () => {
-    const files = await listStateFiles();
+    const files = activeStateFiles();
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       const room = state.rooms[code];
@@ -309,8 +354,9 @@ export async function bumpBlockStreak(): Promise<number> {
 
 export async function bumpBlockStreakEverywhere(): Promise<number> {
   return withStateLock(async () => {
-    const next = ((await readMergedState()).blockStreak ?? 0) + 1;
-    const files = await listStateFiles();
+    const files = activeStateFiles();
+    const states = await Promise.all(files.map(readStateFile));
+    const next = Math.max(0, ...states.map((state) => state.blockStreak ?? 0)) + 1;
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       state.blockStreak = next;
@@ -331,7 +377,7 @@ export async function resetBlockStreak(): Promise<void> {
 
 export async function resetBlockStreakEverywhere(): Promise<void> {
   await withStateLock(async () => {
-    const files = await listStateFiles();
+    const files = activeStateFiles();
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       if (!state.blockStreak) return;
@@ -343,11 +389,18 @@ export async function resetBlockStreakEverywhere(): Promise<void> {
 
 export async function removeRoomEverywhere(code: string): Promise<void> {
   await withStateLock(async () => {
-    const files = await listStateFiles();
+    const files = activeStateFiles();
     await Promise.all(files.map(async (file) => {
       const state = await readStateFile(file);
       if (!(code in state.rooms)) return;
       delete state.rooms[code];
+      if (file !== STATE_FILE && basename(file).startsWith('state-harness-')
+          && Object.keys(state.rooms).length === 0) {
+        await fs.unlink(file).catch((error: NodeJS.ErrnoException) => {
+          if (error.code !== 'ENOENT') throw error;
+        });
+        return;
+      }
       await writeStateFile(file, state);
     }));
   });

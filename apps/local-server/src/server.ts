@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Message, MessageAttachment, Participant, Room, Task, TaskBoard } from '@agent-room/shared';
 import { DurableStore, hashSecret, secret, type DurableRoom } from './store.js';
 
@@ -65,6 +65,42 @@ function headerAccess(req: IncomingMessage): string | null {
   return typeof token === 'string' && token !== '' ? token : null;
 }
 
+const WATCH_TOKEN_TTL_MS = 15 * 60 * 1000;
+
+function watchToken(record: DurableRoom, expiresAt = Date.now() + WATCH_TOKEN_TTL_MS): string {
+  const expires = String(expiresAt);
+  const signature = createHmac('sha256', record.accessHash)
+    .update(`${record.room.code}:${expires}`)
+    .digest('base64url');
+  return `${expires}.${signature}`;
+}
+
+function validWatchToken(record: DurableRoom, token: string | null): boolean {
+  if (!token) return false;
+  const [expires, signature, extra] = token.split('.');
+  if (!expires || !signature || extra || !/^\d+$/.test(expires)) return false;
+  const expiry = Number(expires);
+  if (!Number.isSafeInteger(expiry) || expiry < Date.now() || expiry > Date.now() + WATCH_TOKEN_TTL_MS) return false;
+  const expected = createHmac('sha256', record.accessHash)
+    .update(`${record.room.code}:${expires}`)
+    .digest('base64url');
+  const supplied = Buffer.from(signature);
+  const wanted = Buffer.from(expected);
+  return supplied.length === wanted.length && timingSafeEqual(supplied, wanted);
+}
+
+function openRoomForWatch(db: RoomDb, code: string, req: IncomingMessage, url: URL): DurableRoom {
+  const access = headerAccess(req) ?? url.searchParams.get('access');
+  if (access) return openRoom(db, code, access);
+  const record = db.rooms[code];
+  const view = url.searchParams.get('view');
+  if (!view) throw new HttpError(401, 'room_access_required', 'Room access token required.');
+  if (!record || !validWatchToken(record, view)) {
+    throw new HttpError(403, 'room_access_denied', 'Invalid room access token.');
+  }
+  return record;
+}
+
 /**
  * Open a room by code AND capability, credential first. A missing token is
  * refused 401 and a wrong one 403 before the code is ever looked up, and a
@@ -108,20 +144,38 @@ export function createLocalServer(options: LocalServerOptions) {
       const url = new URL(req.url ?? '/', `http://${host}`);
       if (req.method === 'GET' && url.pathname.startsWith('/watch/')) {
         const code = url.pathname.slice('/watch/'.length);
-        await store.read((db) => { openRoom(db, code, url.searchParams.get('access')); });
+        const record = await store.read((db) => openRoomForWatch(db, code, req, url));
+        // Rotate only a non-empty legacy query capability that authenticated
+        // this request. A view-only caller must not renew its own expiry by
+        // appending an empty access parameter.
+        if (!headerAccess(req) && url.searchParams.get('access')) {
+          res.writeHead(302, {
+            location: `/watch/${encodeURIComponent(code)}?view=${encodeURIComponent(watchToken(record))}`,
+            'cache-control': 'private, no-store',
+            'referrer-policy': 'no-referrer',
+          });
+          res.end();
+          return;
+        }
         res.writeHead(200, {
           'content-type': 'text/html; charset=utf-8',
           'cache-control': 'private, no-store',
           'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'",
           'x-frame-options': 'DENY',
         });
-        res.end(watchPage(code));
+        // A query token is safe to reuse only when it was the credential that
+        // authenticated this request. Header authentication must replace any
+        // stale/tampered query value with a fresh usable view capability.
+        const authenticatedByHeader = Boolean(headerAccess(req));
+        const suppliedView = url.searchParams.get('view');
+        res.end(watchPage(code,
+          !authenticatedByHeader && suppliedView ? suppliedView : watchToken(record)));
         return;
       }
       if (req.method === 'GET' && url.pathname.startsWith('/watch-data/')) {
         const code = url.pathname.slice('/watch-data/'.length);
         const snapshot = await store.read((db) => {
-          const record = openRoom(db, code, url.searchParams.get('access'));
+          const record = openRoomForWatch(db, code, req, url);
           return {
             room: {
               code: record.room.code,
@@ -200,8 +254,9 @@ export function createLocalServer(options: LocalServerOptions) {
   };
 }
 
-function watchPage(code: string): string {
+function watchPage(code: string, viewToken: string): string {
   const safeCode = JSON.stringify(code).replace(/</g, '\\u003c');
+  const safeViewToken = JSON.stringify(viewToken).replace(/</g, '\\u003c');
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Agent Room ${code}</title><style>
@@ -210,10 +265,10 @@ h1{font-size:1.3rem}.meta{color:#9ca3af}.msg{border-left:3px solid #6366f1;paddi
 .who{font-weight:700}.time{color:#9ca3af;font-size:.8rem}pre{white-space:pre-wrap;font:inherit;margin:.4rem 0 0}
 </style></head><body><h1 id="title">Agent Room ${code}</h1><div id="meta" class="meta">Connecting…</div><main id="messages"></main>
 <script>
-const code=${safeCode}; const access=new URLSearchParams(location.search).get('access');
+const code=${safeCode}; const view=${safeViewToken};
 const esc=(s)=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function refresh(){
- const response=await fetch('/watch-data/'+encodeURIComponent(code)+'?access='+encodeURIComponent(access||''),{cache:'no-store'});
+ const response=await fetch('/watch-data/'+encodeURIComponent(code)+'?view='+encodeURIComponent(view),{cache:'no-store'});
  if(!response.ok){document.getElementById('meta').textContent='Access denied';return;}
  const data=await response.json(); document.getElementById('title').textContent=data.room.topic+' — '+data.room.code;
  document.getElementById('meta').textContent=data.room.participants.map(p=>p.name+' ('+p.role+')').join(' · ');
@@ -236,7 +291,11 @@ async function dispatch(store: DurableStore, req: IncomingMessage, input: Record
     await store.transaction((db) => {
       db.rooms[code] = { room, accessHash: hashSecret(access), participants: {}, messages: [], board: { code, tasks: [], version: 1 } };
     });
-    return { room: { ...room, hostKey }, hostKey, accessToken: access };
+    const record = await store.read((db) => db.rooms[code]!);
+    return {
+      room: { ...room, hostKey }, hostKey, accessToken: access,
+      watchPath: `/watch/${encodeURIComponent(code)}?view=${encodeURIComponent(watchToken(record))}`,
+    };
   }
 
   if (input.action === 'join') {

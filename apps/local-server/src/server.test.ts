@@ -1,11 +1,14 @@
 import { mkdtemp, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLocalServer } from './server.js';
 
 const running: Array<ReturnType<typeof createLocalServer>> = [];
-afterEach(async () => { await Promise.all(running.splice(0).map((app) => app.close())); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(running.splice(0).map((app) => app.close()));
+});
 
 async function fixture() {
   const dataDir = await mkdtemp(join(tmpdir(), 'agent-room-local-'));
@@ -151,20 +154,83 @@ describe('local Pilot-1 server', () => {
     const denied = await fetch(`${base}/watch/${created.room.code}`);
     expect(denied.status).toBe(401);
 
-    const watchUrl = `${base}/watch/${created.room.code}?access=${encodeURIComponent(created.accessToken)}`;
+    expect(created.watchPath).toContain('?view=');
+    expect(created.watchPath).not.toContain('access=');
+    expect(created.watchPath).not.toContain(created.accessToken);
+    const watchUrl = `${base}${created.watchPath}`;
     const page = await fetch(watchUrl);
     expect(page.status).toBe(200);
     expect(page.headers.get('content-security-policy')).toContain("default-src 'none'");
-    expect(await page.text()).toContain(`Agent Room ${created.room.code}`);
+    const pageText = await page.text();
+    expect(pageText).toContain(`Agent Room ${created.room.code}`);
+    expect(pageText).not.toContain(created.accessToken);
 
+    const view = new URL(watchUrl).searchParams.get('view');
     const snapshot = await fetch(
-      `${base}/watch-data/${created.room.code}?access=${encodeURIComponent(created.accessToken)}`,
+      `${base}/watch-data/${created.room.code}?view=${encodeURIComponent(view!)}`,
     );
     expect(snapshot.status).toBe(200);
     expect(await snapshot.json()).toMatchObject({
       room: { code: created.room.code, topic: 'Pilot' },
       messages: [],
     });
+
+    const tampered = `${view!.slice(0, -1)}${view!.endsWith('a') ? 'b' : 'a'}`;
+    expect((await fetch(`${base}/watch-data/${created.room.code}?view=${encodeURIComponent(tampered)}`)).status).toBe(403);
+  });
+
+  it('upgrades a persisted watch capability link to a short-lived view link', async () => {
+    const { base, created } = await fixture();
+    const legacy = await fetch(
+      `${base}/watch/${created.room.code}?access=${encodeURIComponent(created.accessToken)}`,
+      { redirect: 'manual' },
+    );
+    expect(legacy.status).toBe(302);
+    const location = legacy.headers.get('location')!;
+    expect(location).toContain('?view=');
+    expect(location).not.toContain('access=');
+    expect(location).not.toContain(created.accessToken);
+    expect((await fetch(`${base}${location}`)).status).toBe(200);
+  });
+
+  it('mints a fresh usable view token when the access header authenticated the page', async () => {
+    const { base, created } = await fixture();
+    const pageResponse = await fetch(
+      `${base}/watch/${created.room.code}?view=tampered`,
+      { headers: { 'x-agent-room-access': created.accessToken } },
+    );
+    expect(pageResponse.status).toBe(200);
+    const page = await pageResponse.text();
+    const encoded = page.match(/const view=("[^"]+")/)?.[1];
+    expect(encoded).toBeTruthy();
+    const freshView = JSON.parse(encoded!);
+    expect(freshView).not.toBe('tampered');
+    expect((await fetch(
+      `${base}/watch-data/${created.room.code}?view=${encodeURIComponent(freshView)}`,
+    )).status).toBe(200);
+  });
+
+  it('does not renew a view token when access is present but empty', async () => {
+    const { base, created } = await fixture();
+    const original = new URL(`${base}${created.watchPath}`);
+    original.searchParams.set('access', '');
+
+    const response = await fetch(original, { redirect: 'manual' });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('location')).toBeNull();
+    const page = await response.text();
+    const view = new URL(`${base}${created.watchPath}`).searchParams.get('view')!;
+    expect(page).toContain(view);
+    const snapshotUrl = `${base}/watch-data/${created.room.code}?view=${encodeURIComponent(view)}`;
+    expect((await fetch(snapshotUrl)).status).toBe(200);
+
+    const expiry = Number(view.split('.')[0]);
+    vi.spyOn(Date, 'now').mockReturnValue(expiry + 1);
+    const expired = await fetch(original, { redirect: 'manual' });
+    expect(expired.status).toBe(403);
+    expect(expired.headers.get('location')).toBeNull();
+    expect((await fetch(snapshotUrl)).status).toBe(403);
   });
 
   it('refuses a non-loopback bind', () => {

@@ -1,4 +1,5 @@
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,7 +11,7 @@ type Handler = (req: any) => Promise<any>;
 const savedClaude = { CLAUDECODE: process.env.CLAUDECODE, CLAUDE_CODE_ENTRYPOINT: process.env.CLAUDE_CODE_ENTRYPOINT };
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.AGENT_ROOM_STATE_FILE; delete process.env.AGENT_ROOM_BASE_URL; delete process.env.AGENT_ROOM_PROFILE;
+  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.CODEX_THREAD_ID; delete process.env.AGENT_ROOM_STATE_FILE; delete process.env.AGENT_ROOM_BASE_URL; delete process.env.AGENT_ROOM_PROFILE;
   if (savedClaude.CLAUDECODE !== undefined) process.env.CLAUDECODE = savedClaude.CLAUDECODE;
   if (savedClaude.CLAUDE_CODE_ENTRYPOINT !== undefined) process.env.CLAUDE_CODE_ENTRYPOINT = savedClaude.CLAUDE_CODE_ENTRYPOINT;
 });
@@ -23,11 +24,13 @@ function arrangeHarnessOnlyState() {
   const dir = mkdtempSync(join(tmpdir(), 'agent-room-tool-'));
   process.env.AGENT_ROOM_STATE_DIR = dir;
   process.env.CODEX_RUN_ID = 'run-1';
+  process.env.CODEX_THREAD_ID = '';
   // The test itself may run under Claude Code; harness detection must see Codex.
   delete process.env.CLAUDECODE; delete process.env.CLAUDE_CODE_ENTRYPOINT;
   delete process.env.AGENT_ROOM_STATE_FILE;
   process.env.AGENT_ROOM_BASE_URL = 'https://room.example';
-  writeFileSync(join(dir, 'state-harness-codex.json'), JSON.stringify({
+  const scope = createHash('sha256').update('run-1').digest('hex').slice(0, 16);
+  writeFileSync(join(dir, `state-harness-codex-${scope}.json`), JSON.stringify({
     version: 1,
     rooms: { [CODE]: { name: 'Me', cursor: 0, joinedAt: 1, accessToken: ACCESS, participantToken: PART } },
   }));
