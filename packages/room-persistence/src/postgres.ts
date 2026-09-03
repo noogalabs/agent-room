@@ -1,7 +1,7 @@
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { POSTGRES_SCHEMA_SQL } from './schema.js';
-import { PersistenceSchemaError, type LeaseEventInput, type RoomPersistence, type RoomReceipt } from './types.js';
+import { PersistenceSchemaError, type LeaseEventInput, type LeaseMembershipPrecondition, type RoomPersistence, type RoomReceipt } from './types.js';
 import { sameJson } from './json.js';
 
 const REQUIRED_SCHEMA_VERSION = 1;
@@ -169,8 +169,21 @@ export class PostgresRoomPersistence implements RoomPersistence {
     expectedVersion: number | null,
     next: TaskBoard,
     events: readonly LeaseEventInput[],
+    membership?: LeaseMembershipPrecondition,
   ): Promise<boolean> {
     return this.transaction(async client => {
+      if (membership) {
+        const locked = await client.query<{ version: number; status: string; room_json: unknown }>(
+          'SELECT version, status, room_json FROM agent_room_rooms WHERE code = $1 FOR UPDATE', [code],
+        );
+        const row = locked.rows[0];
+        const room = row ? value<Room>(row.room_json) : null;
+        const membersPresent = room?.status === 'active' && Number(row?.version) === membership.roomVersion &&
+          membership.members.every(required => room.participants.some(participant =>
+            participant.authenticatedIdentity?.cardFingerprint === required.memberId &&
+            participant.name === required.name && participant.client === required.client));
+        if (!membersPresent) return false;
+      }
       let changed: QueryResult;
       if (expectedVersion === null) {
         changed = await client.query(

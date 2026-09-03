@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { RoomRecordServer } from '../src/server.js';
 import { TaskLeaseServer, type LeaseActor } from '../src/task-leases.js';
-import type { LeaseEventInput, RoomPersistence, RoomReceipt } from '../src/types.js';
+import type { LeaseEventInput, LeaseMembershipPrecondition, RoomPersistence, RoomReceipt } from '../src/types.js';
 
 const alice: LeaseActor = { memberId: 'fingerprint-alice', name: 'Alice', client: 'cc' };
 const bob: LeaseActor = { memberId: 'fingerprint-bob', name: 'Bob', client: 'cc' };
@@ -32,6 +32,7 @@ class LeaseMemoryPersistence implements RoomPersistence {
   currentBoard = board();
   receipts: RoomReceipt[] = [];
   boardWrites = 0;
+  beforeLeaseCas?: () => void;
   async createRoom(value: Room) { this.currentRoom = structuredClone(value); }
   async getRoom(code: string) { return code === this.currentRoom.code ? structuredClone(this.currentRoom) : null; }
   async compareAndSwapRoom() { return false; }
@@ -44,9 +45,16 @@ class LeaseMemoryPersistence implements RoomPersistence {
   }
   async compareAndSwapTaskBoardWithLeaseEvents(
     _code: string, expected: number | null, next: TaskBoard, events: readonly LeaseEventInput[],
+    membership?: LeaseMembershipPrecondition,
   ) {
     await Promise.resolve();
+    this.beforeLeaseCas?.();
+    this.beforeLeaseCas = undefined;
     if (expected !== this.currentBoard.version) return false;
+    if (membership && (membership.roomVersion !== this.currentRoom.version ||
+      membership.members.some(required => !this.currentRoom.participants.some(participant =>
+        participant.authenticatedIdentity?.cardFingerprint === required.memberId &&
+        participant.name === required.name && participant.client === required.client)))) return false;
     this.currentBoard = structuredClone(next);
     this.receipts.push(...events.map(event => ({
       id: event.id, roomCode: event.roomCode, kind: 'lease_event' as const,
@@ -167,6 +175,37 @@ describe('task lease production entry', () => {
         requestedById: bob.memberId,
       },
     });
+  });
+
+  it('refuses a claim when the actor leaves between authentication and the atomic board commit', async () => {
+    const store = new LeaseMemoryPersistence();
+    const leases = service(store, { now: 100 });
+    store.beforeLeaseCas = () => {
+      store.currentRoom = { ...store.currentRoom, version: store.currentRoom.version + 1,
+        participants: store.currentRoom.participants.filter(item => item.name !== alice.name) };
+    };
+
+    await expect(leases.claim(room().code, 'T-01', alice))
+      .rejects.toMatchObject({ name: 'task_lease_authenticated_member_required' });
+    expect(store.currentBoard.tasks[0]?.lease).toBeUndefined();
+    expect(store.receipts).toEqual([]);
+  });
+
+  it('refuses a handoff grant when the recipient leaves between revalidation and the atomic board commit', async () => {
+    const store = new LeaseMemoryPersistence();
+    const leases = service(store, { now: 100 });
+    await leases.claim(room().code, 'T-01', alice);
+    await leases.requestHandoff(room().code, 'T-01', bob);
+    const before = structuredClone(store.currentBoard);
+    store.beforeLeaseCas = () => {
+      store.currentRoom = { ...store.currentRoom, version: store.currentRoom.version + 1,
+        participants: store.currentRoom.participants.filter(item => item.name !== bob.name) };
+    };
+
+    await expect(leases.grantHandoff(room().code, 'T-01', alice))
+      .rejects.toMatchObject({ name: 'task_lease_authenticated_member_required' });
+    expect(store.currentBoard).toEqual(before);
+    expect(store.currentBoard.tasks[0]?.lease?.holderId).toBe(alice.memberId);
   });
 
   it.each([

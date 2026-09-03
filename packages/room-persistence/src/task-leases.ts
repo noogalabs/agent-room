@@ -50,8 +50,7 @@ export class TaskLeaseServer {
     private readonly newId: () => string = randomUUID,
   ) {}
 
-  private async authenticatedActor(code: string, actor: LeaseActor): Promise<Participant> {
-    const room = await this.records.getRoom(code);
+  private authenticatedActor(room: { status: string; participants: Participant[] } | null, actor: LeaseActor): Participant {
     const participant = room?.status === 'active' ? room.participants.find(item =>
       item.authenticatedIdentity?.cardFingerprint === actor.memberId &&
       item.name === actor.name && item.client === actor.client) : undefined;
@@ -106,7 +105,6 @@ export class TaskLeaseServer {
     operation: (task: Task, at: number, makeEventId: () => string) =>
       { task: Task; events: LeaseEventInput[] } | Promise<{ task: Task; events: LeaseEventInput[] }>,
   ): Promise<{ board: TaskBoard; task: Task }> {
-    await this.authenticatedActor(code, actor);
     const operationId = this.newId();
     const ids: string[] = [];
     let idIndex = 0;
@@ -116,11 +114,13 @@ export class TaskLeaseServer {
     };
     for (let attempt = 0; attempt < 8; attempt++) {
       idIndex = 0;
+      const room = await this.records.getRoom(code);
+      this.authenticatedActor(room, actor);
       const board = await this.records.getTaskBoard(code);
       if (!board) throw new TaskLeaseError('task_board_not_found', 'Task board was not found.');
       const at = this.now();
       const swept = this.expired(taskAt(board, taskId), at, makeEventId, actor);
-      let result: { task: Task; events: LeaseEventInput[] };
+      let result: { task: Task; events: LeaseEventInput[]; members?: LeaseActor[] };
       try {
         result = await operation(swept.task, at, makeEventId);
       } catch (error) {
@@ -129,13 +129,15 @@ export class TaskLeaseServer {
         const expiryEvents = swept.events.map(event => ({ ...event, roomCode: code }));
         if (await this.records.updateTaskBoardWithLeaseEvents(
           code, board.version, expiredBoard, expiryEvents,
+          { roomVersion: room!.version, members: [actor] },
         )) throw error;
         continue;
       }
       const next = withTask(board, result.task, at);
       const events = [...swept.events, ...result.events]
         .map(event => ({ ...event, roomCode: code }));
-      if (await this.records.updateTaskBoardWithLeaseEvents(code, board.version, next, events)) {
+      if (await this.records.updateTaskBoardWithLeaseEvents(code, board.version, next, events,
+        { roomVersion: room!.version, members: [actor, ...(result.members ?? [])] })) {
         return { board: next, task: result.task };
       }
     }
@@ -213,11 +215,12 @@ export class TaskLeaseServer {
       }
       if (!lease.handoff) throw new TaskLeaseError('task_lease_handoff_missing', 'No handoff is pending.');
       try {
-        await this.authenticatedActor(code, {
+        const recipient = {
           memberId: lease.handoff.requestedById,
           name: lease.handoff.requestedByName,
           client: lease.handoff.requestedByClient,
-        });
+        };
+        this.authenticatedActor(await this.records.getRoom(code), recipient);
       } catch (error) {
         await this.records.appendReceipt({
           id: `handoff-refusal-${eventId()}`,
@@ -245,7 +248,9 @@ export class TaskLeaseServer {
         releasedAt: undefined,
         handoff: undefined,
       };
-      return { task: { ...task, lease: transferred, updatedAt: at },
+      return { task: { ...task, lease: transferred, updatedAt: at }, members: [{
+          memberId: transferred.holderId, name: transferred.holderName, client: transferred.holderClient,
+        }],
         events: [this.event(eventId(), taskId, transferred, 'granted', actor, at,
           { transferredFrom: actor.memberId })] };
     });

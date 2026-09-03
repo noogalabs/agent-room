@@ -1,6 +1,6 @@
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { createRoomPersistence, type PersistenceDependencies, type PersistenceEnvironment } from './factory.js';
-import type { LeaseEventInput, RoomPersistence, RoomReceipt } from './types.js';
+import type { LeaseEventInput, LeaseMembershipPrecondition, RoomPersistence, RoomReceipt } from './types.js';
 
 /**
  * Server-side production entry for durable room records. Business-rule layers
@@ -38,8 +38,9 @@ export class RoomRecordServer {
     expectedVersion: number | null,
     next: TaskBoard,
     events: readonly LeaseEventInput[],
+    membership?: LeaseMembershipPrecondition,
   ): Promise<boolean> {
-    return this.persistence.compareAndSwapTaskBoardWithLeaseEvents(code, expectedVersion, next, events);
+    return this.persistence.compareAndSwapTaskBoardWithLeaseEvents(code, expectedVersion, next, events, membership);
   }
   putMinutes(code: string, reportId: string, report: RoomReport): Promise<void> {
     return this.persistence.putMinutes(code, reportId, report);

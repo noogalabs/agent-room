@@ -206,9 +206,9 @@ describe('RedisRoomPersistence compatibility', () => {
     }])).toBe(true);
 
     const command = redis.commands.at(-1)!;
-    expect(command.slice(0, 6)).toEqual([
-      'EVAL', expect.any(String), '3', `task-board:${room().code}`,
-      `room-receipt-ids:${room().code}`, `room-receipts:${room().code}`,
+    expect(command.slice(0, 7)).toEqual([
+      'EVAL', expect.any(String), '4', `task-board:${room().code}`,
+      `room-receipt-ids:${room().code}`, `room-receipts:${room().code}`, `room:${room().code}`,
     ]);
     expect(command.join(' ')).toContain('lease-event-1');
     expect(command.join(' ')).toContain('"leaseEvent":"granted"');

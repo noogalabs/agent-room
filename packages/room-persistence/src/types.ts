@@ -28,6 +28,15 @@ export interface LeaseEventInput {
   details?: Readonly<Record<string, unknown>>;
 }
 
+export interface LeaseMembershipPrecondition {
+  roomVersion: number;
+  members: readonly {
+    memberId: string;
+    name: string;
+    client: string;
+  }[];
+}
+
 export interface RoomPersistence {
   readonly kind: PersistenceKind;
 
@@ -49,6 +58,7 @@ export interface RoomPersistence {
     expectedVersion: number | null,
     next: TaskBoard,
     events: readonly LeaseEventInput[],
+    membership?: LeaseMembershipPrecondition,
   ): Promise<boolean>;
 
   putMinutes(code: string, reportId: string, report: RoomReport): Promise<void>;
