@@ -146,7 +146,10 @@ function activeStateFiles(): string[] {
 }
 
 export async function readMergedState(): Promise<AgentRoomState> {
-  const files = await listStateFiles();
+  const kind = detectHarness().kind;
+  const files = kind === 'cursor' || kind === 'codex'
+    ? activeStateFiles()
+    : await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
   return mergeStates(states);
 }
@@ -206,7 +209,10 @@ export async function readRoomStateForJoin(code: string, desiredName: string): P
   const current = (await readState()).rooms[code];
   if (current) return current;
 
-  const files = await listStateFiles();
+  const kind = detectHarness().kind;
+  const files = kind === 'cursor' || kind === 'codex'
+    ? activeStateFiles()
+    : await listStateFiles();
   const states = await Promise.all(files.map(readStateFile));
   return states
     .map((state) => state.rooms[code])

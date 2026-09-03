@@ -181,6 +181,23 @@ describe('state harness files', () => {
     expect(await stateModule.readRoomStateForSession('ABC-DEF-GHJ')).toBeUndefined();
   });
 
+  it('does not recover join state from a foreign Codex session with the same name', async () => {
+    const dir = await makeStateDir('agent-room-state-join-session-');
+    vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_RUN_ID', 'run-a');
+    await fs.writeFile(harnessFile(dir, 'codex', 'run-a'), JSON.stringify({
+      version: 1,
+      rooms: { 'ABC-DEF-GHJ': {
+        name: 'Same Name', cursor: 8, joinedAt: 123, hostKey: 'foreign-host-key',
+      } },
+    }));
+
+    vi.stubEnv('CODEX_RUN_ID', 'run-b');
+    vi.resetModules();
+    const stateModule = await import('../src/state.js');
+    expect(await stateModule.readRoomStateForJoin('ABC-DEF-GHJ', 'Same Name')).toBeUndefined();
+  });
+
   it('does not treat the Cursor harness marker as a session identity', async () => {
     const dir = await makeStateDir('agent-room-state-cursor-marker-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
@@ -269,6 +286,11 @@ describe('state harness files', () => {
   it('finds a same-name prior room state after the PPID state changes', async () => {
     const dir = await makeStateDir('agent-room-state-rejoin-');
     vi.stubEnv('AGENT_ROOM_STATE_DIR', dir);
+    vi.stubEnv('CODEX_HOME', '');
+    vi.stubEnv('CODEX_RUN_ID', '');
+    vi.stubEnv('CURSOR_TRACE_ID', '');
+    vi.stubEnv('CURSOR_AGENT', '');
+    vi.stubEnv('TERM_PROGRAM', '');
 
     await fs.writeFile(
       join(dir, 'state-111.json'),
