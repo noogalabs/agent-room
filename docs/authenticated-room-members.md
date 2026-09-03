@@ -20,6 +20,12 @@ The production join order is: validate the existing room access capability; pars
 
 Named refusal outcomes are `agent_card_signature_invalid`, `agent_card_scheme_not_accepted`, and `agent_card_required`. Under the default `legacy` flag, an unsigned join follows today's behavior unchanged. Under `required`, an unsigned legacy join is refused before persistence. No failure path creates or partially updates a participant.
 
+The authentication-scheme vocabulary is enforced as a runtime closed set, not
+only as a TypeScript type. Card declarations, the selected join scheme, and the
+room's accepted-scheme configuration are each validated before any participant
+write; unknown wire values such as `apiKey` fail as
+`agent_card_scheme_not_accepted`.
+
 Fleet private signing keys live outside the repository in the fleet secret store or a permission-restricted file. The room service receives public verification keys only. Join verification performs no network fetch, so a card cannot turn its URL or key reference into SSRF.
 
 ## MCP transport authentication

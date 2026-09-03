@@ -112,4 +112,44 @@ describe('authenticated room join production entry', () => {
     expect(() => memberAuthModeFromEnvironment({ AGENT_ROOM_MEMBER_AUTH: 'optional' }))
       .toThrow(/must be legacy or required/);
   });
+
+  it.each([
+    'card declaration',
+    'selected join scheme',
+    'room configuration',
+  ] as const)('refuses an unknown runtime scheme at the %s boundary without a write', async boundary => {
+    const keys = generateKeyPairSync('ed25519');
+    const persistence = new MemoryPersistence();
+    const validCard = card();
+    const unknownCard = {
+      ...validCard,
+      securitySchemes: { apiKey: { type: 'apiKey' } },
+      security: ['apiKey'],
+    } as unknown as AgentCard;
+    if (boundary === 'room configuration') {
+      persistence.current = {
+        ...persistence.current,
+        acceptedMemberAuthSchemes: ['apiKey'] as unknown as Room['acceptedMemberAuthSchemes'],
+      };
+    }
+    const join = new AuthenticatedRoomJoinServer(
+      new RoomRecordServer(persistence),
+      new AgentCardVerifier([{
+        fleetId: validCard.fleetId, keyId: 'key-1', publicKey: keys.publicKey,
+      }]),
+      'required',
+    );
+    const selected = boundary === 'selected join scheme'
+      ? 'apiKey' as unknown as 'oauth2'
+      : 'oauth2';
+    const selectedCard = boundary === 'card declaration' ? unknownCard : validCard;
+
+    await expect(join.join(room().code, {
+      participant,
+      scheme: selected,
+      signedCard: signAgentCard(selectedCard, 'key-1', keys.privateKey),
+    })).rejects.toMatchObject({ name: 'agent_card_scheme_not_accepted' });
+    expect(persistence.writes).toBe(0);
+    expect(persistence.current.participants).toEqual([]);
+  });
 });

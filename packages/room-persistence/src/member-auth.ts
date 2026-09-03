@@ -16,6 +16,16 @@ import { RoomRecordServer } from './server.js';
 
 export type MemberAuthMode = 'legacy' | 'required';
 
+export const MEMBER_AUTH_SCHEMES = ['oauth2', 'openIdConnect', 'mTLS'] as const;
+
+export function requireMemberAuthScheme(value: unknown): MemberAuthScheme {
+  if (typeof value === 'string' && (MEMBER_AUTH_SCHEMES as readonly string[]).includes(value)) {
+    return value as MemberAuthScheme;
+  }
+  throw new MemberJoinError('agent_card_scheme_not_accepted',
+    'Agent Card authentication scheme is outside the supported closed set.');
+}
+
 export interface AgentCard {
   protocolVersion: string;
   fleetId: string;
@@ -103,6 +113,9 @@ export class AgentCardVerifier {
   }
 
   verify(signed: SignedAgentCard, scheme: MemberAuthScheme): AuthenticatedMemberIdentity {
+    const selectedScheme = requireMemberAuthScheme(scheme);
+    for (const declared of signed.card.security as unknown[]) requireMemberAuthScheme(declared);
+    for (const declared of Object.keys(signed.card.securitySchemes)) requireMemberAuthScheme(declared);
     const header = parseProtected(signed.protected);
     if (header.alg !== 'EdDSA' || header.typ !== 'agent-card+jws' || !header.kid) {
       throw new MemberJoinError('agent_card_signature_invalid', 'Agent Card JWS header is not accepted.');
@@ -122,7 +135,7 @@ export class AgentCardVerifier {
     } catch {
       throw new MemberJoinError('agent_card_signature_invalid', 'Agent Card service URL must use HTTPS.');
     }
-    if (!signed.card.security.includes(scheme) || !(scheme in signed.card.securitySchemes)) {
+    if (!signed.card.security.includes(selectedScheme) || !(selectedScheme in signed.card.securitySchemes)) {
       throw new MemberJoinError('agent_card_scheme_not_accepted', 'Agent Card does not declare the selected scheme.');
     }
     const publicObject = typeof key.publicKey === 'object' && 'type' in key.publicKey &&
@@ -136,7 +149,7 @@ export class AgentCardVerifier {
       cardFingerprint: fingerprint,
       fleetId: signed.card.fleetId,
       cardName: signed.card.name,
-      scheme,
+      scheme: selectedScheme,
       keyId: key.keyId,
       verifiedAt: this.now(),
     };
@@ -154,14 +167,17 @@ export class AuthenticatedRoomJoinServer {
   async join(code: string, input: AuthenticatedJoinInput): Promise<Participant> {
     const room = await this.rooms.getRoom(code);
     if (!room || room.status !== 'active') throw new MemberJoinError('room_not_found', 'Room is not active.');
+    const acceptedSchemes = (room.acceptedMemberAuthSchemes ?? [])
+      .map(value => requireMemberAuthScheme(value));
     let identity: AuthenticatedMemberIdentity | undefined;
     if (!input.signedCard || !input.scheme) {
       if (this.mode === 'required') {
         throw new MemberJoinError('agent_card_required', 'This room requires a signed Agent Card.');
       }
     } else {
-      identity = this.verifier.verify(input.signedCard, input.scheme);
-      if (!room.acceptedMemberAuthSchemes?.includes(input.scheme)) {
+      const selectedScheme = requireMemberAuthScheme(input.scheme);
+      identity = this.verifier.verify(input.signedCard, selectedScheme);
+      if (!acceptedSchemes.includes(selectedScheme)) {
         throw new MemberJoinError('agent_card_scheme_not_accepted', 'Room does not accept the selected Agent Card scheme.');
       }
       if (identity.cardName !== input.participant.name) {
