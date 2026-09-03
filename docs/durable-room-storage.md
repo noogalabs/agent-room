@@ -85,6 +85,8 @@ application does not auto-mutate production schema at request time.
 2. Provision Postgres and explicitly run the reviewed schema migration with
    `AGENT_ROOM_DATABASE_URL=postgresql://... npm run migrate:postgres -w packages/room-persistence`; application startup
    verifies the schema version and fails closed without mutating it.
+   `AGENT_ROOM_ALLOW_REMOTE_DB` is a process-environment break-glass hatch and
+   must never be stored in organization secrets.
 3. Run a dry-run backfill that reads live Redis rooms and related keys, validates
    shared types, and reports counts/conflicts without writing.
 4. Run an idempotent one-way backfill. Existing Postgres keys win only when the

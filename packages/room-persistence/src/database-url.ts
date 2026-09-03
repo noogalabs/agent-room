@@ -1,3 +1,4 @@
+import { Client, type PoolConfig } from 'pg';
 import { PersistenceConfigurationError } from './types.js';
 
 export interface DatabaseEnvironment {
@@ -9,11 +10,6 @@ export interface DatabaseEnvironment {
 export interface MigrationTarget {
   connectionString: string;
   allowRemote: boolean;
-}
-
-export interface PostgresTargetConfig {
-  connectionString?: string;
-  host?: string;
 }
 
 export function postgresTargetFromEnvironment(env: DatabaseEnvironment): MigrationTarget {
@@ -41,27 +37,27 @@ export function migrationTarget(
 }
 
 export function postgresTargetHost(
-  config: PostgresTargetConfig,
-  env: Partial<Pick<NodeJS.ProcessEnv, 'PGHOST'>> = process.env,
+  config: PoolConfig,
 ): string {
-  if (config.connectionString?.trim()) {
-    try {
-      return new URL(config.connectionString).hostname;
-    } catch {
-      throw new PersistenceConfigurationError('Agent-room Postgres URL is malformed.');
-    }
+  try {
+    // Use node-postgres's resolver so query parameters, explicit config fields,
+    // and PG* fallbacks cannot make the client dial a different host than the
+    // one this guard inspected.
+    const client = new Client(config) as Client & { connectionParameters: { host: string } };
+    return client.connectionParameters.host;
+  } catch {
+    throw new PersistenceConfigurationError('Agent-room Postgres configuration is malformed.');
   }
-  return config.host?.trim() || env.PGHOST?.trim() || 'localhost';
 }
 
 export function assertPostgresTargetAllowed(
-  config: PostgresTargetConfig,
+  config: PoolConfig,
   allowRemote: boolean,
-  env: Partial<Pick<NodeJS.ProcessEnv, 'PGHOST'>> = process.env,
 ): void {
-  const host = postgresTargetHost(config, env);
+  const resolvedHost = postgresTargetHost(config);
+  const host = resolvedHost.toLowerCase().replace(/\.$/, '');
   const local = host === 'localhost' || host === '127.0.0.1' || host === '[::1]' || host === '::1'
-    || host.startsWith('/');
+    || resolvedHost.startsWith('/');
   if (!local && !allowRemote) {
     throw new PersistenceConfigurationError(
       `Remote agent-room Postgres host ${host} refused; pass --allow-remote or set AGENT_ROOM_ALLOW_REMOTE_DB=1.`,
