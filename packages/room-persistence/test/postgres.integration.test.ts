@@ -186,25 +186,34 @@ describePostgres('Postgres durable room production entry', () => {
     const server = await RoomRecordServer.fromEnvironment({
       AGENT_ROOM_PERSISTENCE: 'postgres', DATABASE_URL: databaseUrl,
     });
-    const actor = { memberId: 'fingerprint-lease-ci', name: 'Lease Agent', client: 'cc' as const };
+    const actor = { memberId: 'fingerprint-lease-ci-a', name: 'Lease Agent A', client: 'cc' as const };
+    const contender = { memberId: 'fingerprint-lease-ci-b', name: 'Lease Agent B', client: 'cc' as const };
+    const participant = (member: typeof actor) => ({
+      name: member.name, initials: 'LA', color: '#789', role: 'builder', client: member.client,
+      joinedAt: 1, lastSeenAt: 1,
+      authenticatedIdentity: {
+        cardFingerprint: member.memberId, fleetId: 'fleet-ci', cardName: member.name,
+        scheme: 'oauth2' as const, keyId: 'key-ci', verifiedAt: 1,
+      },
+    });
     const durableRoom: Room = {
       ...room(), code: 'PGS-TSK-LES', version: 1,
-      participants: [{
-        name: actor.name, initials: 'LA', color: '#789', role: 'builder', client: actor.client,
-        joinedAt: 1, lastSeenAt: 1,
-        authenticatedIdentity: {
-          cardFingerprint: actor.memberId, fleetId: 'fleet-ci', cardName: actor.name,
-          scheme: 'oauth2', keyId: 'key-ci', verifiedAt: 1,
-        },
-      }],
+      participants: [participant(actor), participant(contender)],
     };
     const durableBoard: TaskBoard = { code: durableRoom.code, version: 1, tasks: [{
       id: 'T-CI', title: 'Lease persistence', state: 'in_progress', createdBy: 'Host', createdAt: 1, updatedAt: 1,
     }] };
     await server.createRoom(durableRoom);
     expect(await server.updateTaskBoard(durableRoom.code, null, durableBoard)).toBe(true);
-    const leases = new TaskLeaseServer(server, () => 100, () => 'ci');
-    await leases.claim(durableRoom.code, 'T-CI', actor);
+    const leases = new TaskLeaseServer(server, () => 100);
+    const race = await Promise.allSettled([
+      leases.claim(durableRoom.code, 'T-CI', actor),
+      leases.claim(durableRoom.code, 'T-CI', contender),
+    ]);
+    expect(race.filter(result => result.status === 'fulfilled')).toHaveLength(1);
+    expect(race.filter(result => result.status === 'rejected')).toHaveLength(1);
+    const winner = race.find(result => result.status === 'fulfilled');
+    const winnerId = winner?.status === 'fulfilled' ? winner.value.task.lease?.holderId : undefined;
     await server.close();
 
     const restarted = await RoomRecordServer.fromEnvironment({
@@ -212,7 +221,7 @@ describePostgres('Postgres durable room production entry', () => {
     });
     try {
       expect((await restarted.getTaskBoard(durableRoom.code))?.tasks[0]?.lease)
-        .toMatchObject({ holderId: actor.memberId, status: 'active' });
+        .toMatchObject({ holderId: winnerId, status: 'active' });
       expect((await restarted.listReceipts(durableRoom.code)).map(item => item.leaseEvent))
         .toEqual(['granted']);
     } finally {
