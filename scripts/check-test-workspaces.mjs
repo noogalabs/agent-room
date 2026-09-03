@@ -6,6 +6,7 @@ const EXPECTED_WORKSPACES = [
   'apps/hosted-agent',
   'apps/local-server',
   'apps/mcp',
+  'apps/room-server',
   'apps/starter',
   'apps/web',
   'packages/room-persistence',
