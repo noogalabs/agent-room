@@ -36,6 +36,12 @@ function memoryRecords(initial = room()) {
     updateRoom: vi.fn(async (_code: string, version: number, next: Room) => { if (version !== current.version) return false; current = structuredClone(next); return true; }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
+    deleteReceipt: vi.fn(async (_code: string, id: string) => {
+      const index = receipts.findIndex(item => item.id === id);
+      if (index < 0) return false;
+      receipts.splice(index, 1);
+      return true;
+    }),
     listReceipts: vi.fn(async () => structuredClone(receipts)),
   } as unknown as RoomRecordServer;
   return { records, current: () => current };
@@ -553,5 +559,44 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     expect(response.status).toBe(200);
     const persisted = await (await fetch(`${base}/api/rooms/${code}`, { headers: { authorization: 'Bearer host-test-token' } })).json() as Room;
     expect(persisted.participants).toHaveLength(1); expect(persisted.participants[0]?.authenticatedIdentity?.fleetId).toBe('fleet-a');
+  });
+
+  it('seats same-fleet agents independently and makes repeat join and leave-rejoin idempotent at the Postgres receipt seam', async () => {
+    const trust = await trustFile(); const code = `PI${Date.now()}`;
+    const hosted = await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl }));
+    opened.push(hosted); await new Promise<void>(resolve => hosted.server.listen(0, '127.0.0.1', resolve));
+    const address = hosted.server.address(); if (!address || typeof address === 'string') throw new Error('listen');
+    const base = `http://127.0.0.1:${address.port}`;
+    expect((await fetch(`${base}/api/rooms`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ ...room(), code }) })).status).toBe(201);
+    const join = async (name: string) => {
+      const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name, url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+      const participant = { name, role: '', color: '#000000', initials: name.slice(0, 2).toUpperCase(), client: 'cc' as const };
+      const response = await fetch(`${base}/api/rooms/${code}/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }) });
+      expect(response.status).toBe(200);
+      return response.json() as Promise<typeof participant & { joinedAt: number; lastSeenAt: number; authenticatedIdentity: { cardFingerprint: string }; participantToken: string }>;
+    };
+    const alpha = await join('Agent Alpha');
+    const beta = await join('Agent Beta');
+    expect(alpha.authenticatedIdentity.cardFingerprint).not.toBe(beta.authenticatedIdentity.cardFingerprint);
+    let persisted = await hosted.rooms.getRoom(code);
+    expect(persisted?.participants.map(item => item.name)).toEqual(['Agent Alpha', 'Agent Beta']);
+    expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(2);
+
+    const repeated = await join('Agent Alpha');
+    expect(repeated.authenticatedIdentity.cardFingerprint).toBe(alpha.authenticatedIdentity.cardFingerprint);
+    expect(repeated.participantToken).not.toBe(alpha.participantToken);
+    persisted = await hosted.rooms.getRoom(code);
+    expect(persisted?.participants.map(item => item.name)).toEqual(['Agent Alpha', 'Agent Beta']);
+    expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(2);
+
+    const leave = await fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${repeated.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'removeParticipant', code, requesterName: 'Agent Alpha', targetName: 'Agent Alpha', targetClient: 'cc' }) });
+    expect(leave.status).toBe(200);
+    expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name)).toEqual(['Agent Beta']);
+    expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(1);
+
+    const rejoined = await join('Agent Alpha');
+    expect(rejoined.participantToken).not.toBe(repeated.participantToken);
+    expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name).sort()).toEqual(['Agent Alpha', 'Agent Beta']);
+    expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(2);
   });
 });

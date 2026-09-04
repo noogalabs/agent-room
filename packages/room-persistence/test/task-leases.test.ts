@@ -68,6 +68,11 @@ class LeaseMemoryPersistence implements RoomPersistence {
   async putMinutes(_code: string, _reportId: string, _report: RoomReport) {}
   async getMinutes() { return null; }
   async appendReceipt(receipt: RoomReceipt) { this.receipts.push(receipt); return true; }
+  async deleteReceipt(_code: string, receiptId: string) {
+    const before = this.receipts.length;
+    this.receipts = this.receipts.filter(item => item.id !== receiptId);
+    return this.receipts.length !== before;
+  }
   async appendLeaseEvent() { return true; }
   async listReceipts() { return structuredClone(this.receipts); }
   async close() {}

@@ -65,6 +65,7 @@ export interface RoomPersistence {
   getMinutes(code: string, reportId: string): Promise<RoomReport | null>;
 
   appendReceipt(receipt: RoomReceipt): Promise<boolean>;
+  deleteReceipt(code: string, receiptId: string): Promise<boolean>;
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean>;
   listReceipts(code: string): Promise<RoomReceipt[]>;
 

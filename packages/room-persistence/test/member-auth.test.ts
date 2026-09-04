@@ -54,6 +54,7 @@ class MemoryPersistence implements RoomPersistence {
   async putMinutes() {}
   async getMinutes() { return null; }
   async appendReceipt() { return false; }
+  async deleteReceipt() { return false; }
   async appendLeaseEvent() { return false; }
   async listReceipts() { return []; }
   async close() {}
@@ -77,6 +78,48 @@ describe('authenticated room join production entry', () => {
     expect(saved.authenticatedIdentity).toMatchObject({ fleetId: 'fleet-synthetic', scheme: 'oauth2', keyId: 'key-1' });
     expect((await persistence.getRoom(room().code))?.participants[0]).toEqual(saved);
     expect(persistence.writes).toBe(1);
+  });
+
+  it('gives two agents from one fleet distinct seats and dedupes a repeat join by agent identity', async () => {
+    const keys = generateKeyPairSync('ed25519');
+    const persistence = new MemoryPersistence();
+    const join = new AuthenticatedRoomJoinServer(
+      new RoomRecordServer(persistence),
+      new AgentCardVerifier([{ fleetId: card().fleetId, keyId: 'key-1', publicKey: keys.publicKey }], () => 20),
+      'required', () => 20,
+    );
+    const firstCard = card();
+    const secondCard = { ...card(), name: 'Reviewer' };
+    const first = await join.join(room().code, {
+      participant, scheme: 'oauth2', signedCard: signAgentCard(firstCard, 'key-1', keys.privateKey),
+    });
+    const second = await join.join(room().code, {
+      participant: { ...participant, name: 'Reviewer', initials: 'RE' }, scheme: 'oauth2',
+      signedCard: signAgentCard(secondCard, 'key-1', keys.privateKey),
+    });
+    const repeated = await join.join(room().code, {
+      participant, scheme: 'oauth2', signedCard: signAgentCard(firstCard, 'key-1', keys.privateKey),
+    });
+
+    expect(first.authenticatedIdentity?.cardFingerprint)
+      .not.toBe(second.authenticatedIdentity?.cardFingerprint);
+    expect(repeated).toEqual(first);
+    expect((await persistence.getRoom(room().code))?.participants).toEqual([first, second]);
+    expect(persistence.writes).toBe(2);
+  });
+
+  it('tolerates historical duplicate authenticated rows by exposing one seat per fingerprint', async () => {
+    const persistence = new MemoryPersistence();
+    const duplicate = {
+      ...participant, joinedAt: 20, lastSeenAt: 20,
+      authenticatedIdentity: {
+        cardFingerprint: 'same-agent', fleetId: 'fleet-synthetic', cardName: participant.name,
+        scheme: 'oauth2' as const, keyId: 'key-1', verifiedAt: 20,
+      },
+    };
+    persistence.current = { ...room(), participants: [duplicate, structuredClone(duplicate)] };
+
+    expect((await new RoomRecordServer(persistence).getRoom(room().code))?.participants).toEqual([duplicate]);
   });
 
   it('refuses a tampered signature before any participant write', async () => {

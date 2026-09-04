@@ -153,7 +153,8 @@ export class AgentCardVerifier {
       : createPublicKey(key.publicKey);
     const publicDer = publicObject.export({ type: 'spki', format: 'der' });
     const fingerprint = createHash('sha256')
-      .update(signed.card.fleetId).update('\0').update(publicDer).digest('hex');
+      .update(signed.card.fleetId).update('\0').update(publicDer)
+      .update('\0').update(signed.card.name).digest('hex');
     return {
       cardFingerprint: fingerprint,
       fleetId: signed.card.fleetId,
@@ -191,6 +192,25 @@ export class AuthenticatedRoomJoinServer {
       }
       if (identity.cardName !== input.participant.name) {
         throw new MemberJoinError('agent_card_identity_mismatch', 'Participant name does not match the verified Agent Card.');
+      }
+    }
+    if (identity) {
+      const matches = room.participants.filter(item =>
+        item.authenticatedIdentity?.cardFingerprint === identity.cardFingerprint);
+      if (matches.length > 0) {
+        const existing = matches[0]!;
+        // Historical versions could append the same fleet identity more than
+        // once. A repeat join is also the safe opportunity to collapse those
+        // rows without changing the surviving seat identity.
+        if (matches.length > 1) {
+          const participants = room.participants.filter(item =>
+            item.authenticatedIdentity?.cardFingerprint !== identity!.cardFingerprint || item === existing);
+          const next = { ...room, version: room.version + 1, participants };
+          if (!await this.rooms.updateRoom(code, room.version, next)) {
+            throw new MemberJoinError('room_version_conflict', 'Room changed while the participant was rejoining.');
+          }
+        }
+        return existing;
       }
     }
     const at = this.now();

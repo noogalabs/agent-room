@@ -226,6 +226,17 @@ export class RedisRoomPersistence implements RoomPersistence {
     return Number(result) === 1;
   }
 
+  async deleteReceipt(code: string, receiptId: string): Promise<boolean> {
+    const rows = await this.client.command<string[] | null>(['LRANGE', receiptsKey(code), 0, -1]);
+    const row = (rows ?? []).find(item => (JSON.parse(item) as RoomReceipt).id === receiptId);
+    if (!row) return false;
+    const result = await this.client.pipeline<unknown>([
+      ['LREM', receiptsKey(code), 1, row],
+      ['SREM', receiptIdsKey(code), receiptId],
+    ]);
+    return Number(result[0]) === 1;
+  }
+
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean> {
     return this.appendReceipt({
       id: event.id,

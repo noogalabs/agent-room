@@ -275,6 +275,14 @@ export class PostgresRoomPersistence implements RoomPersistence {
     return false;
   }
 
+  async deleteReceipt(code: string, receiptId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      'DELETE FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2',
+      [code, receiptId],
+    );
+    return count(result) === 1;
+  }
+
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean> {
     return this.appendReceipt({
       id: event.id,

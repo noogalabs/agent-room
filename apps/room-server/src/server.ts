@@ -99,6 +99,17 @@ export async function createHostedRoomServer(
     if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
     return { ...issued, participant };
   };
+  const appendMemberRosterReceipt = async (code: string, participant: import('@agent-room/shared').Participant) => {
+    const identity = participant.authenticatedIdentity;
+    if (!identity) throw new HumanSessionError('agent_identity_required');
+    await rooms.appendReceipt({
+      id: `member-roster:${identity.cardFingerprint}`,
+      roomCode: code,
+      kind: 'receipt',
+      createdAt: participant.joinedAt,
+      payload: { memberName: participant.name, memberClient: participant.client },
+    });
+  };
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://room.invalid');
@@ -124,9 +135,8 @@ export async function createHostedRoomServer(
         }
         if (input.action === 'join') {
           const participant = await joins.join(code, input as never);
-          if (!participant.authenticatedIdentity) throw new HumanSessionError('agent_identity_required');
-          await rooms.appendReceipt({ id: `member-roster:${participant.authenticatedIdentity.cardFingerprint}`, roomCode: code, kind: 'receipt', createdAt: Date.now(), payload: { memberName: participant.name, memberClient: participant.client } });
-          return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity).token });
+          await appendMemberRosterReceipt(code, participant);
+          return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
         }
         const token = bearer(req) ?? '';
         if (input.action === 'get' || input.action === 'messages' || input.action === 'taskBoard' || input.action === 'sweep') {
@@ -137,7 +147,8 @@ export async function createHostedRoomServer(
         }
         if (input.action === 'send' || input.action === 'presence') {
           const session = await humans.verifyMemberSession(token, code);
-          const room = await rooms.getRoom(code); const member = room?.participants.find(item => item.name === session.name && item.client === session.client);
+          const room = await rooms.getRoom(code); const member = room?.participants.find(item =>
+            item.client === session.client && item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
           if (!room || !member?.authenticatedIdentity) throw new HumanSessionError('member_session_required');
           if (input.action === 'presence') {
             const next = { ...room, version: room.version + 1, participants: room.participants.map(item => item === member ? { ...item, lastSeenAt: Date.now(), listenUntil: Number(input.until) } : item) };
@@ -149,6 +160,21 @@ export async function createHostedRoomServer(
           const message: Message = { id: supplied.id, type: 'msg', name: member.name, role: member.role, initials: member.initials, color: member.color, client: member.client, text: supplied.text, time: supplied.time, attachments: supplied.attachments };
           const sequence = await rooms.appendMessage(code, message);
           return reply(res, 200, { result: { cursor: sequence, message } });
+        }
+        if (input.action === 'removeParticipant') {
+          const session = await humans.verifyMemberSession(token, code);
+          const room = await rooms.getRoom(code);
+          const member = room?.participants.find(item =>
+            item.client === session.client &&
+            item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
+          if (!room || !member?.authenticatedIdentity || input.targetName !== member.name || input.targetClient !== member.client) {
+            throw new HumanSessionError('member_session_required');
+          }
+          const next = { ...room, version: room.version + 1,
+            participants: room.participants.filter(item => item !== member) };
+          if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
+          await rooms.deleteReceipt(code, `member-roster:${member.authenticatedIdentity.cardFingerprint}`);
+          return reply(res, 200, { room: next });
         }
         throw new HumanSessionError('room_action_invalid');
       }
@@ -242,9 +268,8 @@ export async function createHostedRoomServer(
       }
       if (req.method === 'POST' && action === 'join') {
         const participant = await joins.join(code, await body(req) as never);
-        if (!participant.authenticatedIdentity) throw new HumanSessionError('agent_identity_required');
-        await rooms.appendReceipt({ id: `member-roster:${participant.authenticatedIdentity.cardFingerprint}`, roomCode: code, kind: 'receipt', createdAt: Date.now(), payload: { memberName: participant.name, memberClient: participant.client } });
-        return reply(res, 200, { ...participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity).token });
+        await appendMemberRosterReceipt(code, participant);
+        return reply(res, 200, { ...participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
       }
       if (req.method === 'POST' && action === 'messages') {
         const session = await humans.verifySession(bearer(req) ?? '', code);
