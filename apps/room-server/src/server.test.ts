@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Pool } from 'pg';
 import { RoomRecordServer, signAgentCard } from '@agent-room/room-persistence';
 import type { Room } from '@agent-room/shared';
 import { createHostedRoomServer, startHostedRoomServer } from './server.js';
@@ -549,7 +550,7 @@ describe('hosted room production entry', () => {
     expect(memory.current().participants.map(item => item.name)).toEqual(['Bob']);
     expect(memory.receipts().some(item => item.id === `member-roster:${alice.body.participant.authenticatedIdentity!.cardFingerprint}`)).toBe(false);
     expect(memory.receipts()).toContainEqual(expect.objectContaining({
-      id: `human-session:${alice.body.participant.authenticatedIdentity!.cardFingerprint}:revoked`,
+      id: `human-session:${alice.body.participant.authenticatedIdentity!.seatSessionId}:revoked`,
       payload: expect.objectContaining({ event: 'human_session_revoked' }),
     }));
     const departedPost = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 91, type: 'msg', name: 'Alice', role: '', initials: 'AL', color: '#123456', client: 'web', text: 'departed', time: 91 }) });
@@ -719,7 +720,8 @@ describe('hosted room production entry', () => {
     const legacyReceiptId = `member-roster:${legacyFingerprint}`;
     const bee = { name: beeCard.name, role: '', color: '#000000', initials: 'AB', client: 'cc' as const,
       joinedAt: 1, lastSeenAt: 1, authenticatedIdentity: { cardFingerprint: legacyFingerprint,
-        fleetId: beeCard.fleetId, cardName: beeCard.name, scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: 1 } };
+        fleetId: beeCard.fleetId, cardName: beeCard.name, scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: 1,
+        seatSessionId: 'legacy-bee-seat' } };
     const memory = memoryRecords({ ...room(), participants: [bee] });
     await memory.records.appendReceipt({ id: legacyReceiptId, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1,
       payload: { memberName: bee.name, memberClient: bee.client } });
@@ -839,6 +841,85 @@ describe('hosted room production entry', () => {
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () => {
+  async function rejectReceiptAppendFor(code: string): Promise<() => Promise<void>> {
+    const admin = new Pool({ connectionString: postgresUrl });
+    const suffix = `${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const functionName = `reject_receipt_append_${suffix}`;
+    const triggerName = `reject_receipt_append_${suffix}`;
+    const literalCode = code.replaceAll("'", "''");
+    await admin.query(`CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.room_code = '${literalCode}' THEN RAISE EXCEPTION 'synthetic append-leg failure'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await admin.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON agent_room_receipts
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    return async () => {
+      await admin.query(`DROP TRIGGER IF EXISTS ${triggerName} ON agent_room_receipts`);
+      await admin.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      await admin.end();
+    };
+  }
+
+  async function postgresHosted(code: string) {
+    const trust = await trustFile();
+    const hosted = await createHostedRoomServer(hostedEnv(trust.path, {
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl,
+    }));
+    opened.push(hosted); await new Promise<void>(resolve => hosted.server.listen(0, '127.0.0.1', resolve));
+    const address = hosted.server.address(); if (!address || typeof address === 'string') throw new Error('listen');
+    const base = `http://127.0.0.1:${address.port}`;
+    expect((await fetch(`${base}/api/rooms`, { method: 'POST', headers: {
+      authorization: 'Bearer host-test-token', 'content-type': 'application/json',
+    }, body: JSON.stringify({ ...room(), code }) })).status).toBe(201);
+    return { base, hosted, trust };
+  }
+
+  async function expectAppendFailureRollsBack(
+    hosted: Awaited<ReturnType<typeof createHostedRoomServer>>, code: string, action: () => Promise<Response>,
+  ) {
+    const beforeRoom = await hosted.rooms.getRoom(code); const beforeReceipts = await hosted.rooms.listReceipts(code);
+    const restore = await rejectReceiptAppendFor(code);
+    try {
+      const response = await action();
+      expect(response.status).not.toBe(200);
+      expect(await hosted.rooms.getRoom(code)).toStrictEqual(beforeRoom);
+      expect(await hosted.rooms.listReceipts(code)).toStrictEqual(beforeReceipts);
+    } finally { await restore(); }
+  }
+
+  it('rolls back human join when its real Postgres roster-receipt append leg fails', async () => {
+    const code = `HJ${Date.now()}`; const { base, hosted } = await postgresHosted(code);
+    const invite = await (await fetch(`${base}/api/rooms/${code}/human-invites?singleUse=true`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+    })).json() as { token: string };
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/human-session`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inviteToken: invite.token, name: 'Append Human', role: 'human' }),
+    }));
+  });
+
+  it('rolls back agent self-leave when its real Postgres revocation append leg fails', async () => {
+    const code = `AL${Date.now()}`; const { base, hosted, trust } = await postgresHosted(code);
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent Leave', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const joined = await (await fetch(`${base}/api/rooms/${code}/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant: { name: card.name, role: '', color: '#000000', initials: 'AL', client: 'cc' }, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }) })).json() as { participantToken: string };
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'removeParticipant', code, targetName: card.name, targetClient: 'cc' }) }));
+  });
+
+  it('rolls back human self-leave when its real Postgres revocation append leg fails', async () => {
+    const code = `HL${Date.now()}`; const { base, hosted } = await postgresHosted(code);
+    const invite = await (await fetch(`${base}/api/rooms/${code}/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    const joined = await (await fetch(`${base}/api/rooms/${code}/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Human Leave' }) })).json() as { token: string };
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/human-session`, { method: 'DELETE', headers: { authorization: `Bearer ${joined.token}` } }));
+  });
+
+  it('rolls back host removal when its real Postgres revocation append leg fails', async () => {
+    const code = `HR${Date.now()}`; const { base, hosted } = await postgresHosted(code);
+    const invite = await (await fetch(`${base}/api/rooms/${code}/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    await fetch(`${base}/api/rooms/${code}/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Host Removed' }) });
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ action: 'remove', targetName: 'Host Removed', targetClient: 'web' }) }));
+  });
+
   it('creates, reads, and authenticates a member through the real hosted entry', async () => {
     const trust = await trustFile(); const code = `PG${Date.now()}`;
     const hosted = await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl }));
@@ -892,6 +973,18 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     expect(rejoined.participantToken).not.toBe(repeated.participantToken);
     expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name).sort()).toEqual(['Agent Alpha', 'Agent Beta']);
     expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(2);
+    const rejoinedRead = await fetch(`${base}/api/room`, { method: 'POST',
+      headers: { authorization: `Bearer ${rejoined.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'messages', code }) });
+    expect(rejoinedRead.status).toBe(200);
+    const removedAgain = await fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST',
+      headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', targetName: 'Agent Alpha', targetClient: 'cc' }) });
+    expect(removedAgain.status).toBe(200);
+    const revokedAgain = await fetch(`${base}/api/room`, { method: 'POST',
+      headers: { authorization: `Bearer ${rejoined.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'get', code }) });
+    expect(await revokedAgain.json()).toStrictEqual({ error: 'agent_session_revoked' });
   });
 
   it('converges simultaneous first joins of one signed identity on one Postgres seat with two fresh tokens', async () => {

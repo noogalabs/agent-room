@@ -129,7 +129,7 @@ export async function createHostedRoomServer(
           return reply(res, 200, { room, hostKey: '' });
         }
         if (input.action === 'join') {
-          const participant = await joins.join(code, input as never);
+          const participant = await joins.join(code, input as never, humans.createSeatSessionId());
           return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
         }
         const token = bearer(req) ?? '';
@@ -168,7 +168,7 @@ export async function createHostedRoomServer(
             participants: room.participants.filter(item => item !== member) };
           if (!await rooms.updateRoomAndReceipts(
             code, room.version, next, [`member-roster:${member.authenticatedIdentity.cardFingerprint}`],
-            [humans.sessionRevocationReceipt(code, member.authenticatedIdentity.cardFingerprint)],
+            [humans.sessionRevocationReceipt(code, session.seatSessionId ?? session.id)],
           )) throw new HumanSessionError('room_version_conflict');
           return reply(res, 200, { room: next });
         }
@@ -218,7 +218,7 @@ export async function createHostedRoomServer(
         const next = { ...room!, version: room!.version + 1, participants: room!.participants.filter(item => item !== member) };
         if (!await rooms.updateRoomAndReceipts(code, room!.version, next,
           [`member-roster:${member.authenticatedIdentity!.cardFingerprint}`],
-          [humans.sessionRevocationReceipt(code, member.authenticatedIdentity!.cardFingerprint)])) {
+          [humans.sessionRevocationReceipt(code, session.seatSessionId ?? session.id)])) {
           throw new HumanSessionError('room_version_conflict');
         }
         return reply(res, 200, next);
@@ -276,14 +276,14 @@ export async function createHostedRoomServer(
         if (input.action === 'turn-state') return reply(res, 200, null);
         if (input.action === 'direct-invoke') return reply(res, 200, false);
         if (input.action === 'skip-current') return reply(res, 200, null);
-        let next = room; let removedRosterReceiptId: string | undefined; let removedSessionFingerprint: string | undefined;
+        let next = room; let removedRosterReceiptId: string | undefined; let removedSeatSessionId: string | undefined;
         if (input.action === 'mute') next = { ...room, participants: room.participants.map(item => item.name === input.targetName && item.client === input.targetClient ? { ...item, canSpeak: !input.muted } : item) };
         else if (input.action === 'remove') {
           const removed = room.participants.find(item => item.name === input.targetName && item.client === input.targetClient);
           next = { ...room, participants: room.participants.filter(item => item !== removed) };
           if (removed?.authenticatedIdentity) {
-            removedSessionFingerprint = removed.authenticatedIdentity.cardFingerprint;
-            removedRosterReceiptId = `member-roster:${removedSessionFingerprint}`;
+            removedSeatSessionId = removed.authenticatedIdentity.seatSessionId;
+            removedRosterReceiptId = `member-roster:${removed.authenticatedIdentity.cardFingerprint}`;
           }
         }
         else if (input.action === 'end') next = { ...room, status: 'ended', endedAt: Date.now() };
@@ -291,9 +291,9 @@ export async function createHostedRoomServer(
         else if (input.action === 'reply-mode') next = { ...room, replyMode: input.mode, modeConfig: input.config };
         else throw new HumanSessionError('room_action_invalid');
         next = { ...next, version: room.version + 1 };
-        const updated = removedRosterReceiptId && removedSessionFingerprint
+        const updated = removedRosterReceiptId && removedSeatSessionId
           ? await rooms.updateRoomAndReceipts(code, room.version, next, [removedRosterReceiptId],
-              [humans.sessionRevocationReceipt(code, removedSessionFingerprint)])
+              [humans.sessionRevocationReceipt(code, removedSeatSessionId)])
           : await rooms.updateRoom(code, room.version, next);
         if (!updated) throw new HumanSessionError('room_version_conflict');
         return reply(res, 200, next);
@@ -305,7 +305,7 @@ export async function createHostedRoomServer(
         const room = await rooms.getRoom(code); return room ? reply(res, 200, room) : reply(res, 404, { error: 'room_not_found' });
       }
       if (req.method === 'POST' && action === 'join') {
-        const participant = await joins.join(code, await body(req) as never);
+        const participant = await joins.join(code, await body(req) as never, humans.createSeatSessionId());
         return reply(res, 200, { ...participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
       }
       if (req.method === 'POST' && action === 'messages') {
