@@ -74,10 +74,14 @@ export class HumanSessionAuthority {
   }
 
   async revokeSession(roomCode: string, identityFingerprint: string): Promise<void> {
-    await this.rooms.appendReceipt({
+    await this.rooms.appendReceipt(this.sessionRevocationReceipt(roomCode, identityFingerprint));
+  }
+
+  sessionRevocationReceipt(roomCode: string, identityFingerprint: string): RoomReceipt {
+    return {
       id: `human-session:${identityFingerprint}:revoked`, roomCode, kind: 'receipt', createdAt: this.now(),
       payload: { event: 'human_session_revoked', identityFingerprint },
-    });
+    };
   }
 
   async issueWatch(roomCode: string, ttlMs = 15 * 60_000): Promise<{ token: string; expiresAt: number }> {

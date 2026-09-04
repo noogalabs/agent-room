@@ -45,7 +45,7 @@ function memoryRecords(initial = room()) {
       return true;
     }),
     updateRoomAndReplaceReceipt: vi.fn(async (_code: string, version: number, next: Room, receipt: typeof receipts[number], deleteId?: string) => {
-      if (refuseAtomicJoin || version !== current.version || receipts.some(item => item.id === receipt.id)) return false;
+      if (refuseAtomicJoin || refuseAtomicRemoval || version !== current.version || receipts.some(item => item.id === receipt.id)) return false;
       const deleteIndex = deleteId ? receipts.findIndex(item => item.id === deleteId) : -1;
       if (deleteId && deleteIndex < 0) return false;
       current = structuredClone(next);
@@ -395,7 +395,7 @@ describe('hosted room production entry', () => {
   it('fails human self-leave without changing the room or receipts when atomic cleanup refuses', async () => {
     const { base, memory, session } = await joinedHuman();
     const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
-    (memory.records.updateRoomAndDeleteReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    (memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
       method: 'DELETE', headers: { authorization: `Bearer ${session.token}` },
     });
@@ -408,7 +408,7 @@ describe('hosted room production entry', () => {
   it('fails host removal without changing the room or receipts when atomic cleanup refuses', async () => {
     const { base, memory } = await joinedHuman();
     const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
-    (memory.records.updateRoomAndDeleteReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    (memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     const response = await fetch(`${base}/api/rooms/ROOM1/actions`, {
       method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'remove', targetName: 'Sam', targetClient: 'web' }),
