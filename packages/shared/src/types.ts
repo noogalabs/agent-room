@@ -9,8 +9,6 @@ export interface AuthenticatedMemberIdentity {
   scheme: MemberAuthScheme;
   keyId: string;
   verifiedAt: number;
-  // Server-minted identifier for one active seating of this identity.
-  seatSessionId?: string;
 }
 
 export interface Participant {

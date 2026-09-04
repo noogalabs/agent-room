@@ -183,7 +183,7 @@ export class AuthenticatedRoomJoinServer {
     private readonly now: () => number = Date.now,
   ) {}
 
-  async join(code: string, input: AuthenticatedJoinInput, seatSessionId?: string): Promise<Participant> {
+  async join(code: string, input: AuthenticatedJoinInput): Promise<Participant> {
     let room = await this.rooms.getRoom(code);
     if (!room || room.status !== 'active') throw new MemberJoinError('room_not_found', 'Room is not active.');
     const acceptedSchemes = (room.acceptedMemberAuthSchemes ?? [])
@@ -197,7 +197,6 @@ export class AuthenticatedRoomJoinServer {
     } else {
       const selectedScheme = requireMemberAuthScheme(input.scheme, 'selected_join_scheme');
       ({ identity, legacyFingerprint } = this.verifier.verifyWithLegacyFingerprint(input.signedCard, selectedScheme));
-      if (seatSessionId) identity = { ...identity, seatSessionId };
       if (!acceptedSchemes.includes(selectedScheme)) {
         throw new MemberJoinError('agent_card_scheme_not_accepted', 'Room does not accept the selected Agent Card scheme.');
       }
@@ -225,17 +224,12 @@ export class AuthenticatedRoomJoinServer {
         item.authenticatedIdentity?.cardFingerprint === identity.cardFingerprint);
       if (matches.length > 0) {
         const existing = matches[0]!;
-        const active = existing.authenticatedIdentity?.seatSessionId || !identity.seatSessionId
-          ? existing
-          : { ...existing, authenticatedIdentity: {
-            ...existing.authenticatedIdentity!, seatSessionId: identity.seatSessionId,
-          } };
         // Historical versions could append the same fleet identity more than
         // once. A repeat join is also the safe opportunity to collapse those
         // rows without changing the surviving seat identity.
-        if (matches.length > 1 || active !== existing) {
+        if (matches.length > 1) {
           const participants = room.participants.flatMap(item => {
-            if (item === existing) return [active];
+            if (item === existing) return [existing];
             return item.authenticatedIdentity?.cardFingerprint === identity!.cardFingerprint ? [] : [item];
           });
           const next = { ...room, version: room.version + 1, participants };
@@ -243,7 +237,7 @@ export class AuthenticatedRoomJoinServer {
             throw new MemberJoinError('room_version_conflict', 'Room changed while the participant was rejoining.');
           }
         }
-        return active;
+        return existing;
       }
     }
     const at = this.now();

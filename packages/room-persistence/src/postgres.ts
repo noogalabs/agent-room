@@ -152,6 +152,7 @@ export class PostgresRoomPersistence implements RoomPersistence {
         if (count(existing) !== 1) return false;
       }
       for (const receipt of appendReceipts) {
+        if (deleteReceiptIds.includes(receipt.id)) continue;
         const collision = await client.query(
           'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
           [code, receipt.id],

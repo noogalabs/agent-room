@@ -129,8 +129,8 @@ export async function createHostedRoomServer(
           return reply(res, 200, { room, hostKey: '' });
         }
         if (input.action === 'join') {
-          const participant = await joins.join(code, input as never, humans.createSeatSessionId());
-          return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
+          const participant = await joins.join(code, input as never);
+          return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: (await humans.issueAgentSession(code, participant.authenticatedIdentity!)).token });
         }
         const token = bearer(req) ?? '';
         if (input.action === 'get' || input.action === 'messages' || input.action === 'taskBoard' || input.action === 'sweep') {
@@ -166,9 +166,11 @@ export async function createHostedRoomServer(
           }
           const next = { ...room, version: room.version + 1,
             participants: room.participants.filter(item => item !== member) };
+          const revocation = await humans.sessionRevocationChange(code, member.authenticatedIdentity.cardFingerprint);
           if (!await rooms.updateRoomAndReceipts(
-            code, room.version, next, [`member-roster:${member.authenticatedIdentity.cardFingerprint}`],
-            [humans.sessionRevocationReceipt(code, session.seatSessionId ?? session.id)],
+            code, room.version, next,
+            [`member-roster:${member.authenticatedIdentity.cardFingerprint}`, ...revocation.deleteReceiptIds],
+            [revocation.receipt],
           )) throw new HumanSessionError('room_version_conflict');
           return reply(res, 200, { room: next });
         }
@@ -216,9 +218,10 @@ export async function createHostedRoomServer(
         const session = await humans.verifySession(bearer(req) ?? '', code);
         const room = await rooms.getRoom(code); const member = resolveSessionParticipant(room, session);
         const next = { ...room!, version: room!.version + 1, participants: room!.participants.filter(item => item !== member) };
+        const revocation = await humans.sessionRevocationChange(code, member.authenticatedIdentity!.cardFingerprint);
         if (!await rooms.updateRoomAndReceipts(code, room!.version, next,
-          [`member-roster:${member.authenticatedIdentity!.cardFingerprint}`],
-          [humans.sessionRevocationReceipt(code, session.seatSessionId ?? session.id)])) {
+          [`member-roster:${member.authenticatedIdentity!.cardFingerprint}`, ...revocation.deleteReceiptIds],
+          [revocation.receipt])) {
           throw new HumanSessionError('room_version_conflict');
         }
         return reply(res, 200, next);
@@ -276,13 +279,13 @@ export async function createHostedRoomServer(
         if (input.action === 'turn-state') return reply(res, 200, null);
         if (input.action === 'direct-invoke') return reply(res, 200, false);
         if (input.action === 'skip-current') return reply(res, 200, null);
-        let next = room; let removedRosterReceiptId: string | undefined; let removedSeatSessionId: string | undefined;
+        let next = room; let removedRosterReceiptId: string | undefined; let removedIdentityFingerprint: string | undefined;
         if (input.action === 'mute') next = { ...room, participants: room.participants.map(item => item.name === input.targetName && item.client === input.targetClient ? { ...item, canSpeak: !input.muted } : item) };
         else if (input.action === 'remove') {
           const removed = room.participants.find(item => item.name === input.targetName && item.client === input.targetClient);
           next = { ...room, participants: room.participants.filter(item => item !== removed) };
           if (removed?.authenticatedIdentity) {
-            removedSeatSessionId = removed.authenticatedIdentity.seatSessionId;
+            removedIdentityFingerprint = removed.authenticatedIdentity.cardFingerprint;
             removedRosterReceiptId = `member-roster:${removed.authenticatedIdentity.cardFingerprint}`;
           }
         }
@@ -291,9 +294,11 @@ export async function createHostedRoomServer(
         else if (input.action === 'reply-mode') next = { ...room, replyMode: input.mode, modeConfig: input.config };
         else throw new HumanSessionError('room_action_invalid');
         next = { ...next, version: room.version + 1 };
-        const updated = removedRosterReceiptId && removedSeatSessionId
-          ? await rooms.updateRoomAndReceipts(code, room.version, next, [removedRosterReceiptId],
-              [humans.sessionRevocationReceipt(code, removedSeatSessionId)])
+        const revocation = removedIdentityFingerprint
+          ? await humans.sessionRevocationChange(code, removedIdentityFingerprint) : undefined;
+        const updated = removedRosterReceiptId && revocation
+          ? await rooms.updateRoomAndReceipts(code, room.version, next,
+              [removedRosterReceiptId, ...revocation.deleteReceiptIds], [revocation.receipt])
           : await rooms.updateRoom(code, room.version, next);
         if (!updated) throw new HumanSessionError('room_version_conflict');
         return reply(res, 200, next);
@@ -305,8 +310,8 @@ export async function createHostedRoomServer(
         const room = await rooms.getRoom(code); return room ? reply(res, 200, room) : reply(res, 404, { error: 'room_not_found' });
       }
       if (req.method === 'POST' && action === 'join') {
-        const participant = await joins.join(code, await body(req) as never, humans.createSeatSessionId());
-        return reply(res, 200, { ...participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
+        const participant = await joins.join(code, await body(req) as never);
+        return reply(res, 200, { ...participant, participantToken: (await humans.issueAgentSession(code, participant.authenticatedIdentity!)).token });
       }
       if (req.method === 'POST' && action === 'messages') {
         const session = await humans.verifySession(bearer(req) ?? '', code);
