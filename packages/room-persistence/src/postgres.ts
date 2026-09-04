@@ -65,13 +65,18 @@ export class PostgresRoomPersistence implements RoomPersistence {
   }
 
   async createRoom(room: Room): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO agent_room_rooms
-        (code, topic, created_at, created_by, status, version, room_json, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
-      [room.code, room.topic, room.createdAt, room.createdBy, room.status,
-        room.version, JSON.stringify(room), room.createdAt],
-    );
+    try {
+      await this.pool.query(
+        `INSERT INTO agent_room_rooms
+          (code, topic, created_at, created_by, status, version, room_json, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)`,
+        [room.code, room.topic, room.createdAt, room.createdBy, room.status,
+          room.version, JSON.stringify(room), room.createdAt],
+      );
+    } catch (error) {
+      if ((error as { code?: string }).code === '23505') throw new Error(`Room ${room.code} already exists`);
+      throw error;
+    }
   }
 
   async getRoom(code: string): Promise<Room | null> {

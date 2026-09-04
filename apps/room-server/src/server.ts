@@ -58,6 +58,13 @@ export async function createHostedRoomServer(
   const humans = new HumanSessionAuthority(rooms, humanSecret, env.AGENT_ROOM_HUMAN_ISSUER ?? 'hosted-room');
   const hostToken = env.AGENT_ROOM_HOST_TOKEN;
   if (!hostToken) throw new HumanSessionError('host_token_required');
+  const createRoomExclusive = async (room: Room): Promise<void> => {
+    try { await rooms.createRoom(room); }
+    catch (caught) {
+      if (caught instanceof Error && caught.message.includes('already exists')) throw new HumanSessionError('room_already_exists');
+      throw caught;
+    }
+  };
   const bearer = (req: IncomingMessage): string | undefined => /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
   const requireHost = (req: IncomingMessage): void => {
     const token = bearer(req);
@@ -111,7 +118,7 @@ export async function createHostedRoomServer(
           const generatedCode = randomBytes(6).toString('base64url').toUpperCase();
           const room: Room = { code: generatedCode, topic: String(input.topic ?? '').trim(), createdBy: requested.name, createdAt: Date.now(), status: 'active', version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
           if (!room.topic) throw new HumanSessionError('room_topic_required');
-          await rooms.createRoom(room);
+          await createRoomExclusive(room);
           return reply(res, 200, { room, hostKey: '' });
         }
         if (input.action === 'join') {
@@ -145,13 +152,20 @@ export async function createHostedRoomServer(
         throw new HumanSessionError('room_action_invalid');
       }
       if (req.method === 'POST' && url.pathname === '/api/rooms') {
-        requireHost(req); const room = await body(req) as Room; await rooms.createRoom(room); return reply(res, 201, room);
+        requireHost(req); const room = await body(req) as Room; await createRoomExclusive(room); return reply(res, 201, room);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/browser-creator-invites') {
+        requireHost(req); const input = await body(req) as { code?: string };
+        const code = input.code?.trim(); if (!code) throw new HumanSessionError('browser_room_invalid');
+        const creator = humans.issueCreator(code);
+        return reply(res, 201, { ...creator, createPath: `/?code=${encodeURIComponent(code)}&creator=${encodeURIComponent(creator.token)}` });
       }
       if (req.method === 'POST' && url.pathname === '/api/browser-rooms') {
         const input = await body(req) as { code?: string; topic?: string; name?: string; role?: string; color?: string; initials?: string };
         if (!input.code || !input.topic?.trim() || !input.name?.trim()) throw new HumanSessionError('browser_room_invalid');
+        humans.verifyCreator(bearer(req) ?? '', input.code);
         const room: Room = { code: input.code, topic: input.topic.trim(), createdBy: input.name.trim(), createdAt: Date.now(), status: 'active', version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
-        await rooms.createRoom(room);
+        await createRoomExclusive(room);
         const invite = await humans.issueInvite(room.code);
         const joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
         return reply(res, 201, { room: await rooms.getRoom(room.code), ...joined });

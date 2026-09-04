@@ -7,7 +7,7 @@ export class HumanSessionError extends Error {
 }
 
 interface Capability {
-  purpose: 'invite' | 'session' | 'agent' | 'watch';
+  purpose: 'invite' | 'session' | 'agent' | 'watch' | 'creator';
   roomCode: string;
   id: string;
   expiresAt: number;
@@ -76,6 +76,18 @@ export class HumanSessionAuthority {
     if (!room || room.status !== 'active') throw new HumanSessionError('room_not_found');
     const expiresAt = this.now() + ttlMs;
     return { expiresAt, token: this.sign({ purpose: 'watch', roomCode, id: randomBytes(18).toString('base64url'), expiresAt }) };
+  }
+
+  issueCreator(roomCode: string, ttlMs = 15 * 60_000): { token: string; expiresAt: number } {
+    if (!roomCode.trim()) throw new HumanSessionError('browser_room_invalid');
+    const expiresAt = this.now() + ttlMs;
+    return { expiresAt, token: this.sign({ purpose: 'creator', roomCode, id: randomBytes(18).toString('base64url'), expiresAt }) };
+  }
+
+  verifyCreator(token: string, roomCode: string): Capability {
+    const creator = this.verify(token, 'creator');
+    if (creator.roomCode !== roomCode) throw new HumanSessionError('browser_creator_invalid');
+    return creator;
   }
 
   async exchangeInvite(roomCode: string, token: string, name: string, _role: string, creator = false): Promise<{ token: string; expiresAt: number; identity: AuthenticatedMemberIdentity }> {

@@ -37,9 +37,9 @@ export function exchangeHumanInvite(code: string, inviteToken: string, input: { 
   });
 }
 
-export function createHostedBrowserRoom(input: { code: string; topic: string; name: string; role: string; color: string; initials: string }) {
+export function createHostedBrowserRoom(creatorToken: string, input: { code: string; topic: string; name: string; role: string; color: string; initials: string }) {
   return request<{ room: Room; token: string; participant: Room['participants'][number] }>('/api/browser-rooms', {
-    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(input),
+    method: 'POST', headers: { authorization: `Bearer ${creatorToken}`, 'content-type': 'application/json' }, body: JSON.stringify(input),
   });
 }
 

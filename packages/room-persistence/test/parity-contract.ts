@@ -20,6 +20,8 @@ export async function proveImmutableRecordParity(
   receipt: RoomReceipt,
 ): Promise<void> {
   await store.createRoom(room);
+  await expect(store.createRoom({ ...room, topic: 'takeover' })).rejects.toThrow('already exists');
+  expect(await store.getRoom(room.code)).toEqual(room);
 
   await store.putMinutes(room.code, 'parity-minutes', report);
   await store.putMinutes(room.code, 'parity-minutes', report);

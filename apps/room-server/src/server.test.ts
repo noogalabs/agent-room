@@ -32,7 +32,7 @@ function memoryRecords(initial = room()) {
   let current = structuredClone(initial);
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
-    createRoom: vi.fn(async (value: Room) => { current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
+    createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
     updateRoom: vi.fn(async (_code: string, version: number, next: Room) => { if (version !== current.version) return false; current = structuredClone(next); return true; }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
@@ -309,7 +309,9 @@ describe('hosted room production entry', () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const createdResponse = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01', topic: 'demo', name: 'David', role: 'host', color: '#123456', initials: 'DH' }) });
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01' }) })).json() as { token: string; createPath: string };
+    expect(creator.createPath).toContain('creator=');
+    const createdResponse = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01', topic: 'demo', name: 'David', role: 'host', color: '#123456', initials: 'DH' }) });
     expect(createdResponse.status).toBe(201);
     const created = await createdResponse.json() as { token: string; participant: Room['participants'][number] };
     expect(created.participant.authenticatedIdentity).toMatchObject({ cardName: 'David', scheme: 'oauth2' });
@@ -322,6 +324,20 @@ describe('hosted room production entry', () => {
     const action = await fetch(`${base}/api/rooms/WEB01/actions`, { method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'system-message', message: forged }) });
     expect(action.status).toBe(200);
     expect(memory.records.appendMessage).toHaveBeenCalledWith('WEB01', { id: 3, type: 'sys', name: 'David', role: 'human', initials: 'DH', color: '#123456', client: 'web', text: 'host note', time: 3, attachments: undefined });
+  });
+
+  it('refuses unauthenticated browser creation and a signed overwrite of a live room', async () => {
+    const trust = await trustFile(); const memory = memoryRecords(); vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const attempted = { code: 'ROOM1', topic: 'takeover', name: 'Attacker', role: 'host', color: '#000', initials: 'AT' };
+    let response = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(attempted) });
+    expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ROOM1' }) })).json() as { token: string };
+    response = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' }, body: JSON.stringify(attempted) });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_already_exists' });
+    expect(memory.current()).toEqual(room());
+    expect(memory.current().participants).toHaveLength(0);
   });
 
   it('binds host authority to the creator session and reserves the creator name before invite burn', async () => {

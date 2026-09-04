@@ -16,6 +16,7 @@ class RecordingRedis implements UpstashClient {
     this.commands.push(command);
     const [name, key, value] = command;
     if (name === 'SET') {
+      if (command.includes('NX') && this.values.has(String(key))) return null as T;
       this.values.set(String(key), String(value));
       return 'OK' as T;
     }
@@ -47,6 +48,7 @@ class ExpiringRedis implements UpstashClient {
     const [name, rawKey, rawValue] = command;
     const key = String(rawKey);
     if (name === 'SET') {
+      if (command.includes('NX') && this.values.has(key)) return null as T;
       this.values.set(key, String(rawValue));
       const exIndex = command.indexOf('EX');
       if (exIndex >= 0) this.expiries.set(key, this.nowSeconds + Number(command[exIndex + 1]));
@@ -76,6 +78,7 @@ class StatefulRedis implements UpstashClient {
     const [name, rawKey] = command;
     const key = String(rawKey);
     if (name === 'SET') {
+      if (command.includes('NX') && this.values.has(key)) return null as T;
       this.values.set(key, String(command[2]));
       return 'OK' as T;
     }
@@ -208,8 +211,9 @@ describe('RedisRoomPersistence compatibility', () => {
     await server.createRoom(room());
 
     expect(redis.commands[0]).toEqual([
-      'SET', 'room:ABC-DEF-GHJ', JSON.stringify(room()), 'EX', ROOM_TTL_SECONDS,
+      'SET', 'room:ABC-DEF-GHJ', JSON.stringify(room()), 'EX', ROOM_TTL_SECONDS, 'NX',
     ]);
+    await expect(server.createRoom(room())).rejects.toThrow('already exists');
   });
 
   it('expires a production-entry Redis room after a 25-hour clock skip', async () => {

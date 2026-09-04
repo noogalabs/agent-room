@@ -114,7 +114,8 @@ export class RedisRoomPersistence implements RoomPersistence {
   constructor(private readonly client: UpstashClient) {}
 
   async createRoom(room: Room): Promise<void> {
-    await this.client.command(['SET', roomKey(room.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS]);
+    const result = await this.client.command(['SET', roomKey(room.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS, 'NX']);
+    if (result === null) throw new Error(`Room ${room.code} already exists`);
   }
 
   async getRoom(code: string): Promise<Room | null> {

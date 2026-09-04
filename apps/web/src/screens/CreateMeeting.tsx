@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { generateCode, ROLE_PRESETS } from '@agent-room/shared';
+import { ROLE_PRESETS } from '@agent-room/shared';
 import { createHostedBrowserRoom } from '../room-server-client.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { ROOM_TEMPLATES, roleLabelFor, templateById } from '../lib/templates.js';
@@ -17,6 +17,8 @@ export function CreateMeeting() {
   // converted you", we don't have to refactor the wire format.
   const [searchParams] = useSearchParams();
   const initialTopic = searchParams.get('topic') ?? '';
+  const creatorToken = searchParams.get('creator') ?? '';
+  const authorizedCode = searchParams.get('code') ?? '';
   const [templateId, setTemplateId] = useState<string>('blank');
   const [topic, setTopic] = useState(initialTopic);
   const [name, setName] = useState('');
@@ -40,8 +42,9 @@ export function CreateMeeting() {
     if (!topic.trim() || !name.trim()) return;
     setBusy(true); setError(null);
     try {
-      const code = generateCode();
-      const created = await createHostedBrowserRoom({ code, topic: topic.trim(), name: name.trim(), role: role.trim(), color: colorForName(name.trim()), initials: initialsFor(name.trim()) });
+      if (!creatorToken || !authorizedCode) throw new Error('A signed creator link is required.');
+      const code = authorizedCode;
+      const created = await createHostedBrowserRoom(creatorToken, { code, topic: topic.trim(), name: name.trim(), role: role.trim(), color: colorForName(name.trim()), initials: initialsFor(name.trim()) });
       sessionStorage.setItem(`room:${code}:self`, JSON.stringify({ name: name.trim(), role: 'human', token: created.token }));
       // Stash the chosen template so Lobby (and the room itself) can post the
       // opening message + show suggested roles. We use sessionStorage and not
