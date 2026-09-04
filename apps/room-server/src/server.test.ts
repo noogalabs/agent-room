@@ -296,6 +296,46 @@ describe('hosted room production entry', () => {
     const invite = await inviteResponse.json() as { token: string; joinPath: string };
     expect(invite.joinPath).toBe(`/j/WEB01?invite=${encodeURIComponent(invite.token)}`);
     expect(invite.joinPath).not.toBe('/j/WEB01');
+    const forged = { id: 3, type: 'msg', name: 'Agent A', role: 'agent', initials: 'AA', color: '#000', client: 'cc', text: 'host note', time: 3, metadata: { roleAtSend: 'host_directed' } };
+    const action = await fetch(`${base}/api/rooms/WEB01/actions`, { method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'system-message', message: forged }) });
+    expect(action.status).toBe(200);
+    expect(memory.records.appendMessage).toHaveBeenCalledWith('WEB01', { id: 3, type: 'sys', name: 'David', role: 'human', initials: 'DH', color: '#123456', client: 'web', text: 'host note', time: 3, attachments: undefined });
+  });
+
+  it('binds host authority to the creator session and reserves the creator name before invite burn', async () => {
+    const trust = await trustFile(); const memory = memoryRecords(); vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const issued = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    let response = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: issued.token, name: 'host' }) });
+    expect(await response.json()).toStrictEqual({ error: 'human_name_taken' });
+    response = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: issued.token, name: 'Other' }) });
+    expect(response.status).toBe(200);
+    const other = await response.json() as { token: string };
+    response = await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: `Bearer ${other.token}` } });
+    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+    response = await fetch(`${base}/api/rooms/ROOM1?access=host-test-token`);
+    expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
+  });
+
+  it('refuses a revoked invite capability on room and message reads', async () => {
+    const trust = await trustFile(); const memory = memoryRecords(); vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { id: string; token: string };
+    expect((await fetch(`${base}/api/rooms/ROOM1?access=${encodeURIComponent(invite.token)}`)).status).toBe(200);
+    await fetch(`${base}/api/rooms/ROOM1/human-invites/${invite.id}`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
+    let response = await fetch(`${base}/api/rooms/ROOM1?access=${encodeURIComponent(invite.token)}`);
+    expect(await response.json()).toStrictEqual({ error: 'human_invite_revoked' });
+    response = await fetch(`${base}/api/rooms/ROOM1/messages?access=${encodeURIComponent(invite.token)}`);
+    expect(await response.json()).toStrictEqual({ error: 'human_invite_revoked' });
+  });
+
+  it('refuses a valid unexpired watch capability on the write path', async () => {
+    const trust = await trustFile(); const memory = memoryRecords(); vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const watch = await (await fetch(`${base}/api/rooms/ROOM1/watch-links`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string; expiresAt: number };
+    expect(watch.expiresAt).toBeGreaterThan(Date.now());
+    const response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${watch.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 1, type: 'msg', name: 'Sam', role: 'human', initials: 'SA', color: '#000', client: 'web', text: 'hello', time: 1 }) });
+    expect(await response.json()).toStrictEqual({ error: 'watch_session_read_only' });
   });
 
   it('refuses expired and tampered human sessions by name', async () => {

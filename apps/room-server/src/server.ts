@@ -70,22 +70,22 @@ export async function createHostedRoomServer(
     if (token && token.length === hostToken.length && timingSafeEqual(Buffer.from(token), Buffer.from(hostToken))) return;
     const session = await humans.verifySession(token ?? '', code);
     const room = await rooms.getRoom(code);
-    const member = room?.participants.find(item => item.client === 'web' && item.name === session.name);
-    if (!room || session.name !== room.createdBy || !member?.authenticatedIdentity) throw new HumanSessionError('host_auth_required');
+    const member = room?.participants.find(item => item.client === 'web' && item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
+    if (!room || session.role !== 'host' || !member?.authenticatedIdentity || member.authenticatedIdentity.cardFingerprint !== session.identityFingerprint) throw new HumanSessionError('host_auth_required');
   };
-  const readCapability = (req: IncomingMessage, url: URL): string => bearer(req) ?? url.searchParams.get('access') ?? '';
   const authorizeRead = async (req: IncomingMessage, url: URL, code: string): Promise<void> => {
-    const token = readCapability(req, url);
-    if (token.length === hostToken.length && timingSafeEqual(Buffer.from(token), Buffer.from(hostToken))) return;
+    const headerToken = bearer(req);
+    if (headerToken?.length === hostToken.length && timingSafeEqual(Buffer.from(headerToken), Buffer.from(hostToken))) return;
+    const token = headerToken ?? url.searchParams.get('access') ?? '';
     await humans.verifyReadCapability(token, code);
   };
-  const addHuman = async (code: string, input: { inviteToken: string; name: string; role?: string; color?: string; initials?: string }) => {
+  const addHuman = async (code: string, input: { inviteToken: string; name: string; role?: string; color?: string; initials?: string; creator?: boolean }) => {
     const room = await rooms.getRoom(code);
     if (!room || room.status !== 'active') throw new HumanSessionError('room_not_found');
     const cleanName = input.name.trim();
     const roster = await rooms.listReceipts(code);
-    if (room.participants.some(item => item.name === cleanName) || roster.some(item => item.payload.memberName === cleanName)) throw new HumanSessionError('human_name_taken');
-    const issued = await humans.exchangeInvite(code, input.inviteToken, cleanName, input.role ?? '');
+    if ((!input.creator && cleanName === room.createdBy) || room.participants.some(item => item.name === cleanName) || roster.some(item => item.payload.memberName === cleanName)) throw new HumanSessionError('human_name_taken');
+    const issued = await humans.exchangeInvite(code, input.inviteToken, cleanName, input.role ?? '', input.creator === true);
     const participant = { name: issued.identity.cardName, role: 'human', color: input.color ?? '#555555', initials: input.initials ?? 'HU', client: 'web' as const, joinedAt: issued.identity.verifiedAt, lastSeenAt: issued.identity.verifiedAt, authenticatedIdentity: issued.identity };
     const next = { ...room, version: room.version + 1, participants: [...room.participants, participant] };
     if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
@@ -153,7 +153,7 @@ export async function createHostedRoomServer(
         const room: Room = { code: input.code, topic: input.topic.trim(), createdBy: input.name.trim(), createdAt: Date.now(), status: 'active', version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
         await rooms.createRoom(room);
         const invite = await humans.issueInvite(room.code);
-        const joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name });
+        const joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
         return reply(res, 201, { room: await rooms.getRoom(room.code), ...joined });
       }
       const inviteMatch = /^\/api\/rooms\/([^/]+)\/human-invites(?:\/([^/]+))?$/.exec(url.pathname);
@@ -198,7 +198,14 @@ export async function createHostedRoomServer(
         const code = decodeURIComponent(actionMatch[1]!); await authorizeRoomHost(req, code);
         const input = await body(req) as { action?: string; targetName?: string; targetClient?: 'web' | 'cc'; muted?: boolean; mode?: ReplyMode; config?: ReplyModeConfig; message?: Message };
         const room = await rooms.getRoom(code); if (!room) throw new HumanSessionError('room_not_found');
-        if (input.action === 'system-message' && input.message) return reply(res, 200, { sequence: await rooms.appendMessage(code, input.message) });
+        if (input.action === 'system-message' && input.message) {
+          const session = await humans.verifySession(bearer(req) ?? '', code);
+          const member = room.participants.find(item => item.client === 'web' && item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
+          if (!member) throw new HumanSessionError('host_auth_required');
+          const supplied = input.message;
+          const message: Message = { id: supplied.id, type: 'sys', name: member.name, role: member.role, initials: member.initials, color: member.color, client: 'web', text: supplied.text, time: supplied.time, attachments: supplied.attachments };
+          return reply(res, 200, { sequence: await rooms.appendMessage(code, message) });
+        }
         if (input.action === 'turn-state') return reply(res, 200, null);
         if (input.action === 'direct-invoke') return reply(res, 200, false);
         if (input.action === 'skip-current') return reply(res, 200, null);
