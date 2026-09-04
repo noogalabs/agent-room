@@ -370,26 +370,47 @@ describe('hosted room production entry', () => {
     expect(memory.records.updateRoom).not.toHaveBeenCalled();
   });
 
-  it('refuses a still-signed human session whose participant was removed from the room', async () => {
-    const trust = await trustFile(); const memory = memoryRecords();
-    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
-    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
-    const session = await (await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Sam', role: 'Lead', color: '#123456', initials: 'SL' }) })).json() as { token: string; participant: { role: string; initials: string; color: string } };
-    const post = () => fetch(`${base}/api/rooms/ROOM1/messages`, {
-      method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 1, type: 'msg', name: 'Sam', role: session.participant.role, initials: session.participant.initials, color: session.participant.color, client: 'web', text: 'hello', time: 10 }),
-    });
-    expect((await post()).status).toBe(201);
-    const removed = await fetch(`${base}/api/rooms/ROOM1/actions`, {
-      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'remove', targetName: 'Sam', targetClient: 'web' }),
-    });
-    expect(removed.status).toBe(200);
-    expect(memory.current().participants.some(item => item.name === 'Sam')).toBe(false);
-    const after = await post();
-    expect(after.status).toBe(400);
-    expect(await after.json()).toStrictEqual({ error: 'human_session_revoked' });
+  it('refuses the complete human and agent operation matrix after host removal', async () => {
+    const trust = await trustFile();
+    const seats = [
+      { kind: 'human' as const, name: 'Sam', client: 'web' as const, expected: 'human_session_revoked' },
+      { kind: 'agent' as const, name: 'Agent A', client: 'cc' as const, expected: 'agent_session_revoked' },
+    ];
+    for (const seat of seats) {
+      const memory = memoryRecords();
+      vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValueOnce(memory.records);
+      const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+      let token: string;
+      if (seat.kind === 'human') {
+        const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, {
+          method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+        })).json() as { token: string };
+        token = (await (await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ inviteToken: invite.token, name: seat.name, role: 'Lead', color: '#123456', initials: 'SL' }),
+        })).json() as { token: string }).token;
+      } else {
+        const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: seat.name, url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+        token = (await (await fetch(`${base}/api/rooms/ROOM1/join`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ participant: { name: seat.name, role: '', color: '#000000', initials: 'AA', client: seat.client }, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+        })).json() as { participantToken: string }).participantToken;
+      }
+      expect((await fetch(`${base}/api/rooms/ROOM1/actions`, {
+        method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'remove', targetName: seat.name, targetClient: seat.client }),
+      })).status).toBe(200);
+      for (const action of ['send', 'messages', 'get'] as const) {
+        const response = await fetch(`${base}/api/room`, {
+          method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ action, code: 'ROOM1', cursor: 0,
+            message: { id: 1, type: 'msg', name: seat.name, role: seat.kind, initials: 'XX', color: '#000000', client: seat.client, text: 'after removal', time: 1 } }),
+        });
+        expect([seat.kind, action, response.status, await response.json()]).toStrictEqual([
+          seat.kind, action, 400, { error: seat.expected },
+        ]);
+      }
+    }
   });
 
   it('fails human self-leave without changing the room or receipts when atomic cleanup refuses', async () => {
@@ -417,38 +438,6 @@ describe('hosted room production entry', () => {
     expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
     expect(memory.current()).toStrictEqual(beforeRoom);
     expect(memory.receipts()).toStrictEqual(beforeReceipts);
-  });
-
-  it('refuses both room and message reads from a removed agent existing session token', async () => {
-    const trust = await trustFile(); const memory = memoryRecords();
-    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
-    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
-    const participant = { name: card.name, role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
-    const joined = await (await fetch(`${base}/api/rooms/ROOM1/join`, {
-      method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
-    })).json() as { participantToken: string };
-    const removed = await fetch(`${base}/api/rooms/ROOM1/actions`, {
-      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'remove', targetName: card.name, targetClient: 'cc' }),
-    });
-    expect(removed.status).toBe(200);
-    const read = (action: 'get' | 'messages') => fetch(`${base}/api/room`, {
-      method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ action, code: 'ROOM1', cursor: 0 }),
-    });
-    const send = await fetch(`${base}/api/room`, {
-      method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ action: 'send', code: 'ROOM1', message: { id: 1, type: 'msg', name: card.name, role: '', color: '#000000', initials: 'AA', client: 'cc', text: 'after removal', time: 1 } }),
-    });
-    expect(send.status).toBe(400);
-    expect(await send.json()).toStrictEqual({ error: 'agent_session_revoked' });
-    for (const action of ['get', 'messages'] as const) {
-      const response = await read(action);
-      expect(response.status).toBe(400);
-      expect(await response.json()).toStrictEqual({ error: 'agent_session_revoked' });
-    }
   });
 
   it('checks human name and historical agent roster before burning an invite', async () => {
