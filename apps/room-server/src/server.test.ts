@@ -392,6 +392,32 @@ describe('hosted room production entry', () => {
     expect(await after.json()).toStrictEqual({ error: 'human_session_revoked' });
   });
 
+  it('refuses both room and message reads from a removed agent existing session token', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: card.name, role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
+    const joined = await (await fetch(`${base}/api/rooms/ROOM1/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+    })).json() as { participantToken: string };
+    const removed = await fetch(`${base}/api/rooms/ROOM1/actions`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', targetName: card.name, targetClient: 'cc' }),
+    });
+    expect(removed.status).toBe(200);
+    const read = (action: 'get' | 'messages') => fetch(`${base}/api/room`, {
+      method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action, code: 'ROOM1', cursor: 0 }),
+    });
+    for (const action of ['get', 'messages'] as const) {
+      const response = await read(action);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toStrictEqual({ error: 'agent_session_revoked' });
+    }
+  });
+
   it('checks human name and historical agent roster before burning an invite', async () => {
     const trust = await trustFile(); const seeded = room();
     seeded.participants = [{ name: 'Sam', role: 'human', color: '#111111', initials: 'SA', client: 'web', joinedAt: 1, lastSeenAt: 1 }];

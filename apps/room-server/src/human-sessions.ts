@@ -153,9 +153,11 @@ export class HumanSessionAuthority {
     return session;
   }
 
-  verifyAgentSession(token: string, roomCode: string): Capability {
+  async verifyAgentSession(token: string, roomCode: string): Promise<Capability> {
     const session = this.verify(token, 'agent');
     if (session.roomCode !== roomCode || !session.name || !session.identityFingerprint || session.client !== 'cc') throw new HumanSessionError('agent_session_invalid');
+    const receipts = await this.rooms.listReceipts(roomCode);
+    if (receipts.some(item => item.id === `human-session:${session.identityFingerprint}:revoked`)) throw new HumanSessionError('agent_session_revoked');
     return session;
   }
 
@@ -170,12 +172,12 @@ export class HumanSessionAuthority {
       }
       return signed;
     }
-    if (signed.purpose === 'agent') return this.verifyAgentSession(token, roomCode);
+    if (signed.purpose === 'agent') return await this.verifyAgentSession(token, roomCode);
     return this.verifySession(token, roomCode);
   }
 
   async verifyMemberSession(token: string, roomCode: string): Promise<Capability> {
     const signed = this.verifySigned(token);
-    return signed.purpose === 'agent' ? this.verifyAgentSession(token, roomCode) : this.verifySession(token, roomCode);
+    return signed.purpose === 'agent' ? await this.verifyAgentSession(token, roomCode) : this.verifySession(token, roomCode);
   }
 }
