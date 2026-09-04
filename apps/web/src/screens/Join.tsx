@@ -1,9 +1,8 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { createClient, getRoom, joinRoom, verifyHostKey, HostNameTakenError, RoomNotFoundError } from '@agent-room/upstash-client';
 import type { Room } from '@agent-room/shared';
 import { isValidCode, CODE_LEN, ROLE_PRESETS } from '@agent-room/shared';
-import { ENV } from '../env.js';
+import { exchangeHumanInvite, getHostedRoom } from '../room-server-client.js';
 import { CodeInput } from '../components/CodeInput.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { AgentJoinQuickstart } from '../components/AgentJoinQuickstart.js';
@@ -27,53 +26,27 @@ export function Join() {
     const dashed = withDashes(raw);
     if (!isValidCode(dashed)) { setErr('Invalid code'); return; }
     setErr(null);
-    const client = createClient(ENV.upstash);
-    getRoom(client, dashed)
+    getHostedRoom(dashed)
       .then(setRoom)
-      .catch(e => setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e)));
+      .catch(e => setErr(String(e).includes('room_not_found') ? 'Room not found' : String(e)));
   }, [raw]);
 
   async function join() {
     if (!room || !name.trim()) return;
     setBusy(true); setErr(null);
     try {
-      const client = createClient(ENV.upstash);
       const trimmed = name.trim();
-      // Host-name lock: claiming the host's display name requires the host
-      // key (set on createRoom). Without it we throw before sending join.
-      if (trimmed === room.createdBy) {
-        // Read from localStorage (survives tab close, scoped to this room
-        // and bounded by the same 24h TTL on the server) with a session-
-        // Storage fallback for hosts whose key landed there before this
-        // change.
-        const hostKey = localStorage.getItem(`room:${room.code}:hostKey`)
-          ?? sessionStorage.getItem(`room:${room.code}:hostKey`)
-          ?? undefined;
-        await verifyHostKey(client, room.code, hostKey);
-      }
-      const participant = {
-        name: trimmed,
-        role: role.trim(),
+      const inviteToken = new URLSearchParams(window.location.search).get('invite') ?? '';
+      const result = await exchangeHumanInvite(room.code, inviteToken, {
+        name: trimmed, role: role.trim(),
         color: colorForName(trimmed),
         initials: initialsFor(trimmed),
-        client: 'web' as const,
-        joinedAt: Date.now(),
-        lastSeenAt: Date.now(),
-      };
-      const result = await joinRoom(client, room.code, participant, {
-        priorIdentity: { name: trimmed, client: 'web' },
       });
-      // joinRoom may have suffixed the name on collision (e.g. "Robin (2)").
-      // Persist whatever the server actually assigned so future writes use it.
       const finalName = result.participant.name;
-      sessionStorage.setItem(`room:${room.code}:self`, JSON.stringify({ name: finalName, role: role.trim() }));
+      sessionStorage.setItem(`room:${room.code}:self`, JSON.stringify({ name: finalName, role: role.trim(), token: result.token }));
       navigate(`/r/${room.code}`);
     } catch (e) {
-      if (e instanceof HostNameTakenError) {
-        setErr(`The name "${name.trim()}" is reserved for the host of this room. Pick a different display name.`);
-      } else {
-        setErr(String(e));
-      }
+      setErr(String(e));
     } finally {
       setBusy(false);
     }

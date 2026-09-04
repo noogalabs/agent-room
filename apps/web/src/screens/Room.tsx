@@ -16,7 +16,7 @@ import { ALLOWED_ATTACHMENT_TYPES, MAX_ATTACHMENTS_PER_MESSAGE, deleteRoomBlobs,
 
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour — long enough that humans + agents discussing intermittently don't trip it
 const AUTO_CLOSE_COUNTDOWN = 5;          // seconds
-interface SelfIdentity { name: string; role: string }
+interface SelfIdentity { name: string; role: string; token: string }
 
 function readStoredSelf(code: string): SelfIdentity | null {
   const stored = sessionStorage.getItem(`room:${code}:self`);
@@ -44,7 +44,7 @@ export function Room() {
   useEffect(() => {
     if (!self) navigate(`/j/${code}`, { replace: true });
   }, [self, code, navigate]);
-  const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '');
+  const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '', self?.token ?? '');
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [attachBusy, setAttachBusy] = useState(false);
