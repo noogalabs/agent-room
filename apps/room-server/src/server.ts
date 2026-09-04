@@ -6,6 +6,7 @@ import { AgentCardVerifier, AuthenticatedRoomJoinServer, MemberJoinError, RoomRe
 import { extractArtifacts, type Message, type ReplyMode, type ReplyModeConfig, type Room, type RoomReport } from '@agent-room/shared';
 import { loadTrustStore } from './trust-store.js';
 import { HumanSessionAuthority, HumanSessionError } from './human-sessions.js';
+import { canonicalHumanMessage, resolveSessionParticipant } from './human-message-identity.js';
 
 export interface HostedRoomServer { server: Server; rooms: RoomRecordServer; close(): Promise<void> }
 
@@ -250,11 +251,8 @@ export async function createHostedRoomServer(
         const session = await humans.verifySession(bearer(req) ?? '', code);
         const supplied = await body(req) as Message;
         const room = await rooms.getRoom(code);
-        const member = room?.participants.find(item => item.client === 'web' && item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
-        if (!member?.authenticatedIdentity || member.authenticatedIdentity.cardName !== session.name || member.name !== session.name) throw new HumanSessionError('human_membership_required');
-        const privilegedRoles = new Set(['agent', 'host', 'moderator', 'system']);
-        if (supplied.client !== 'web' || supplied.name !== member.name || supplied.type !== 'msg' || supplied.metadata !== undefined || (supplied.role !== member.role && privilegedRoles.has(supplied.role))) throw new HumanSessionError('human_identity_mismatch');
-        const message: Message = { id: supplied.id, type: 'msg', name: member.name, role: member.role, initials: member.initials, color: member.color, client: 'web', text: supplied.text, time: supplied.time, attachments: supplied.attachments };
+        const member = resolveSessionParticipant(room, session);
+        const message = canonicalHumanMessage(member, supplied);
         return reply(res, 201, { sequence: await rooms.appendMessage(code, message) });
       }
       if (req.method === 'GET' && action === 'messages') { await authorizeRead(req, url, code); return reply(res, 200, await rooms.listMessages(code, Number(url.searchParams.get('from') ?? 0))); }

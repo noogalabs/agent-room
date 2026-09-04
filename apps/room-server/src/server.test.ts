@@ -209,7 +209,7 @@ describe('hosted room production entry', () => {
     expect(listen).toHaveBeenCalled();
   });
 
-  it('posts typed and empty UI roles as the server-owned human identity and refuses name or privilege-role impersonation', async () => {
+  it('posts typed and empty UI roles, then refuses a revoked session after its first successful post', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
