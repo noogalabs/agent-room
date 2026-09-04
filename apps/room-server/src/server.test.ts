@@ -300,6 +300,24 @@ describe('hosted room production entry', () => {
     expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', { id: 33, type: 'msg', name: 'Sam', role: 'human', initials: 'SA', color: '#123456', client: 'web', text: 'hello', time: 33, attachments: undefined });
   });
 
+  it('production post refuses only supplied metadata while the same request without metadata succeeds', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const message = { id: 34, type: 'msg', name: 'Sam', role: 'Lead', initials: 'SA', color: '#123456', client: 'web', text: 'hello', time: 34 };
+    let response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, metadata: { roleAtSend: 'host_directed' } }) });
+    expect(response.status).toBe(400); expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ id: 34, name: 'Sam', role: 'human', client: 'web' }));
+  });
+
+  it('production post canonicalizes host moderator system and agent display roles to the persisted member role', async () => {
+    const { base, memory, session } = await joinedHuman();
+    for (const [offset, role] of ['host', 'moderator', 'system', 'agent'].entries()) {
+      const response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 40 + offset, type: 'msg', name: 'Sam', role, initials: 'SA', color: '#123456', client: 'web', text: role, time: 40 + offset }) });
+      expect(response.status).toBe(201);
+      expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ id: 40 + offset, name: 'Sam', role: 'human', client: 'web', text: role }));
+    }
+  });
+
   it('refuses to mint a browser creator capability without the host credential', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
