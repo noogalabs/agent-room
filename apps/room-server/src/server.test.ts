@@ -220,12 +220,19 @@ describe('hosted room production entry', () => {
     expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: 'Bearer read-only-watch-token', 'content-type': 'application/json' }, body: JSON.stringify(message) });
     expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
+    const watch = await (await fetch(`${base}/api/rooms/ROOM1/watch-links?ttlMs=1`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    await new Promise(resolve => setTimeout(resolve, 5));
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${watch.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(await response.json()).toStrictEqual({ error: 'watch_session_expired' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, name: 'Agent A', client: 'cc' }) });
     expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
     expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenCalledWith('ROOM1', message);
+    await fetch(`${base}/api/rooms/ROOM1/human-invites/${invite.id}`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(await response.json()).toStrictEqual({ error: 'human_session_revoked' });
     const reuse = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Other', role: '' }) });
-    expect(await reuse.json()).toStrictEqual({ error: 'human_invite_used' });
+    expect(await reuse.json()).toStrictEqual({ error: 'human_invite_revoked' });
   });
 
   it('refuses a revoked human invite before participant mutation', async () => {
@@ -244,12 +251,12 @@ describe('hosted room production entry', () => {
     const authority = new HumanSessionAuthority(memory.records, 's'.repeat(48), 'hosted-room', () => now);
     const invite = await authority.issueInvite('ROOM1', 100);
     const session = await authority.exchangeInvite('ROOM1', invite.token, 'Sam', 'Lead');
-    expect(authority.verifySession(session.token, 'ROOM1')).toMatchObject({ name: 'Sam', role: 'human' });
+    await expect(authority.verifySession(session.token, 'ROOM1')).resolves.toMatchObject({ name: 'Sam', role: 'human' });
     const [payload, signature] = session.token.split('.');
     const tampered = `${payload!.startsWith('a') ? 'b' : 'a'}${payload!.slice(1)}.${signature}`;
-    expect(() => authority.verifySession(tampered, 'ROOM1')).toThrowError(expect.objectContaining({ name: 'human_session_invalid' }));
+    await expect(authority.verifySession(tampered, 'ROOM1')).rejects.toMatchObject({ name: 'human_session_invalid' });
     now = session.expiresAt;
-    expect(() => authority.verifySession(session.token, 'ROOM1')).toThrowError(expect.objectContaining({ name: 'human_session_expired' }));
+    await expect(authority.verifySession(session.token, 'ROOM1')).rejects.toMatchObject({ name: 'human_session_expired' });
   });
 
   it('consumer census pins the durable server as the production image entry', async () => {

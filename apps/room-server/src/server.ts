@@ -100,6 +100,13 @@ export async function createHostedRoomServer(
         if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
         return reply(res, 200, { ...issued, participant });
       }
+      const watchMatch = /^\/api\/rooms\/([^/]+)\/watch-links$/.exec(url.pathname);
+      if (req.method === 'POST' && watchMatch) {
+        requireHost(req);
+        const requestedTtl = Number(url.searchParams.get('ttlMs') ?? 15 * 60_000);
+        const ttlMs = Number.isSafeInteger(requestedTtl) && requestedTtl > 0 && requestedTtl <= 15 * 60_000 ? requestedTtl : 15 * 60_000;
+        return reply(res, 201, await humans.issueWatch(decodeURIComponent(watchMatch[1]!), ttlMs));
+      }
       const match = /^\/api\/rooms\/([^/]+)(?:\/(join|messages))?$/.exec(url.pathname);
       if (!match) return reply(res, 404, { error: 'not_found' });
       const code = decodeURIComponent(match[1]!); const action = match[2];
@@ -108,7 +115,7 @@ export async function createHostedRoomServer(
       }
       if (req.method === 'POST' && action === 'join') return reply(res, 200, await joins.join(code, await body(req) as never));
       if (req.method === 'POST' && action === 'messages') {
-        const session = humans.verifySession(bearer(req) ?? '', code);
+        const session = await humans.verifySession(bearer(req) ?? '', code);
         const message = await body(req) as Message;
         if (message.client !== 'web' || message.name !== session.name) throw new HumanSessionError('human_identity_mismatch');
         const room = await rooms.getRoom(code);

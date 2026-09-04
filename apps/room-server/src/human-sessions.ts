@@ -7,12 +7,13 @@ export class HumanSessionError extends Error {
 }
 
 interface Capability {
-  purpose: 'invite' | 'session';
+  purpose: 'invite' | 'session' | 'watch';
   roomCode: string;
   id: string;
   expiresAt: number;
   name?: string;
   role?: string;
+  inviteId?: string;
 }
 
 function encode(value: unknown): string {
@@ -34,7 +35,7 @@ export class HumanSessionAuthority {
     return `${body}.${createHmac('sha256', this.secret).update(body).digest('base64url')}`;
   }
 
-  private verify(token: string, purpose: Capability['purpose']): Capability {
+  private verifySigned(token: string): Capability {
     const [body, supplied, extra] = token.split('.');
     if (!body || !supplied || extra) throw new HumanSessionError('human_session_invalid');
     const expected = createHmac('sha256', this.secret).update(body).digest();
@@ -44,7 +45,13 @@ export class HumanSessionAuthority {
     let payload: Capability;
     try { payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8')) as Capability; }
     catch { throw new HumanSessionError('human_session_invalid'); }
-    if (payload.purpose !== purpose || payload.expiresAt <= this.now()) throw new HumanSessionError('human_session_expired');
+    return payload;
+  }
+
+  private verify(token: string, purpose: Capability['purpose']): Capability {
+    const payload = this.verifySigned(token);
+    if (payload.purpose !== purpose) throw new HumanSessionError('human_session_invalid');
+    if (payload.expiresAt <= this.now()) throw new HumanSessionError('human_session_expired');
     return payload;
   }
 
@@ -60,6 +67,13 @@ export class HumanSessionAuthority {
 
   async revokeInvite(roomCode: string, id: string): Promise<void> {
     await this.rooms.appendReceipt({ id: `human-invite:${id}:revoked`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_revoked', inviteId: id } });
+  }
+
+  async issueWatch(roomCode: string, ttlMs = 15 * 60_000): Promise<{ token: string; expiresAt: number }> {
+    const room = await this.rooms.getRoom(roomCode);
+    if (!room || room.status !== 'active') throw new HumanSessionError('room_not_found');
+    const expiresAt = this.now() + ttlMs;
+    return { expiresAt, token: this.sign({ purpose: 'watch', roomCode, id: randomBytes(18).toString('base64url'), expiresAt }) };
   }
 
   async exchangeInvite(roomCode: string, token: string, name: string, _role: string): Promise<{ token: string; expiresAt: number; identity: AuthenticatedMemberIdentity }> {
@@ -80,12 +94,22 @@ export class HumanSessionAuthority {
       keyId: 'host-human-session',
       verifiedAt: this.now(),
     };
-    return { expiresAt, identity, token: this.sign({ purpose: 'session', roomCode, id, expiresAt, name: cleanName, role: 'human' }) };
+    return { expiresAt, identity, token: this.sign({ purpose: 'session', roomCode, id, expiresAt, name: cleanName, role: 'human', inviteId: invite.id }) };
   }
 
-  verifySession(token: string, roomCode: string): Capability {
-    const session = this.verify(token, 'session');
+  async verifySession(token: string, roomCode: string): Promise<Capability> {
+    const signed = this.verifySigned(token);
+    if (signed.purpose === 'watch') {
+      throw new HumanSessionError(signed.expiresAt <= this.now() ? 'watch_session_expired' : 'watch_session_read_only');
+    }
+    if (signed.purpose !== 'session') throw new HumanSessionError('human_session_invalid');
+    if (signed.expiresAt <= this.now()) throw new HumanSessionError('human_session_expired');
+    const session = signed;
     if (session.roomCode !== roomCode || !session.name) throw new HumanSessionError('human_session_invalid');
+    if (session.inviteId) {
+      const receipts = await this.rooms.listReceipts(roomCode);
+      if (receipts.some(item => item.id === `human-invite:${session.inviteId}:revoked`)) throw new HumanSessionError('human_session_revoked');
+    }
     return session;
   }
 }

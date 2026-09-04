@@ -16,4 +16,8 @@ The host creates a short-lived, single-use invite with its server-side bearer cr
 2. Open `/j/<room>?invite=<capability>` in the browser.
 3. Enter a display name and optional job title; the server records the seat as role `human`.
 4. Post a message; it is accepted only with the browser session bound to that exact person and room.
-5. Revoke an unused invite to prove it cannot be exchanged, and use a watch link to confirm it remains read-only.
+5. Revoke the invite to invalidate its established session, and use an expired watch link to confirm it remains read-only.
+
+## Guard-removal kill record
+
+The production-entry test `binds human invite, session, join and post identity while watch tokens stay read-only` is the mutation casualty for the HTTP boundary. Removing the bearer verification makes its unauthenticated-post assertion RED; accepting a signed watch capability makes its `watch_session_expired` assertion RED; removing the message/session name-and-client comparison makes its agent/other-human impersonation assertion RED; removing the durable participant identity check makes its persisted-identity assertion RED; and removing the redeemed/revoked receipt checks makes its reuse and established-session-revocation assertions RED. The focused capability test `refuses expired and tampered human sessions by name` turns RED when signature comparison or session expiry is removed. `refuses a revoked human invite before participant mutation` turns RED when the pre-join revocation lookup is removed. The consumer-census test turns RED if `Join`/`useRoom` return to direct Upstash access or if the image stops building and serving `apps/web`.
