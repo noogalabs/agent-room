@@ -602,6 +602,7 @@ describe('hosted room production entry', () => {
     const seed = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const firstBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
+    const alreadyRunningSecondBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
     const creator = await (await fetch(`${firstBase}/api/browser-creator-invites`, {
       method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
       body: JSON.stringify({ code: 'TRUST1' }),
@@ -639,12 +640,13 @@ describe('hosted room production entry', () => {
     }
     const card = { protocolVersion: '0.3', fleetId: 'fleet-b', name: 'Agent B', url: 'https://fleet.invalid/b', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
     const participant = { name: 'Agent B', role: '', color: '#000000', initials: 'AB', client: 'cc' as const };
-    response = await fetch(`${firstBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
+    response = await fetch(`${alreadyRunningSecondBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
     expect(response.status).toBe(200);
     const seated = await response.json() as { participantToken: string };
-    response = await fetch(`${firstBase}/api/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
-    expect(response.status).toBe(200);
-    response = await fetch(`${firstBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
+    // Simulate a different replica mutating the shared store: neither running
+    // server receives an in-process refresh callback.
+    expect(await memory.records.deleteFleetTrustKey('fleet-b', 'key-b')).toBe(true);
+    response = await fetch(`${alreadyRunningSecondBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
     expect(await response.json()).toStrictEqual({ error: 'agent_card_signature_invalid' });
     for (const action of ['get', 'messages', 'send'] as const) {
       response = await fetch(`${firstBase}/api/room`, {
@@ -655,6 +657,9 @@ describe('hosted room production entry', () => {
       expect(response.status).toBe(400);
       expect(await response.json()).toStrictEqual({ error: 'agent_fleet_revoked' });
     }
+    await memory.records.putFleetTrustKey(added);
+    response = await fetch(`${firstBase}/api/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
+    expect(response.status).toBe(200);
 
     const restartedBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
     expect(memory.trustKeys().map(key => `${key.fleetId}:${key.keyId}`)).toEqual(['fleet-a:key-a']);

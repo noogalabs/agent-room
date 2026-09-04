@@ -140,6 +140,7 @@ export async function createHostedRoomServer(
           return reply(res, 200, { room, hostKey: '' });
         }
         if (input.action === 'join') {
+          await refreshTrustKeys();
           const participant = await joins.join(code, input as never);
           return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: (await humans.issueAgentSession(code, participant.authenticatedIdentity!)).token });
         }
@@ -339,6 +340,7 @@ export async function createHostedRoomServer(
         const room = await rooms.getRoom(code); return room ? reply(res, 200, room) : reply(res, 404, { error: 'room_not_found' });
       }
       if (req.method === 'POST' && action === 'join') {
+        await refreshTrustKeys();
         const participant = await joins.join(code, await body(req) as never);
         return reply(res, 200, { ...participant, participantToken: (await humans.issueAgentSession(code, participant.authenticatedIdentity!)).token });
       }
