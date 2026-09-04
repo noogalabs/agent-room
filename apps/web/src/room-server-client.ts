@@ -70,6 +70,21 @@ export function revokeHostedInvite(code: string, token: string, inviteId: string
   });
 }
 
+export interface HostedFleetTrustKey { fleetId: string; keyId: string; publicKey: Record<string, unknown> }
+export function listHostedFleetTrust(code: string, token: string) {
+  return request<HostedFleetTrustKey[]>(`/api/rooms/${encodeURIComponent(code)}/fleet-trust`, { headers: readHeaders(token) });
+}
+export function addHostedFleetTrust(code: string, token: string, key: HostedFleetTrustKey) {
+  return request<HostedFleetTrustKey>(`/api/rooms/${encodeURIComponent(code)}/fleet-trust`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify([key]),
+  });
+}
+export function revokeHostedFleetTrust(code: string, token: string, fleetId: string, keyId: string) {
+  return request<{ removed: boolean }>(`/api/rooms/${encodeURIComponent(code)}/fleet-trust/${encodeURIComponent(fleetId)}/${encodeURIComponent(keyId)}`, {
+    method: 'DELETE', headers: { authorization: `Bearer ${token}` },
+  });
+}
+
 async function action<T>(code: string, token: string, value: Record<string, unknown>): Promise<T> {
   return request<T>(`/api/rooms/${encodeURIComponent(code)}/actions`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(value) });
 }

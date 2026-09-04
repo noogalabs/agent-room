@@ -1,7 +1,7 @@
 import { MAX_MESSAGES_PER_ROOM, ROOM_TTL_SECONDS } from '@agent-room/shared';
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import type { UpstashClient } from '@agent-room/upstash-client';
-import type { LeaseEventInput, LeaseMembershipPrecondition, RoomPersistence, RoomReceipt } from './types.js';
+import type { LeaseEventInput, LeaseMembershipPrecondition, RoomPersistence, RoomReceipt, StoredFleetTrustKey } from './types.js';
 import { canonicalJson } from './json.js';
 
 const roomKey = (code: string): string => `room:${code}`;
@@ -11,6 +11,8 @@ const taskBoardKey = (code: string): string => `task-board:${code}`;
 const minutesKey = (code: string, reportId: string): string => `room-minutes:${code}:${reportId}`;
 const receiptIdsKey = (code: string): string => `room-receipt-ids:${code}`;
 const receiptsKey = (code: string): string => `room-receipts:${code}`;
+const fleetTrustIdsKey = 'agent-room:fleet-trust-ids';
+const fleetTrustKey = (id: string): string => `agent-room:fleet-trust:${id}`;
 
 const ROOM_CAS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
@@ -364,6 +366,31 @@ export class RedisRoomPersistence implements RoomPersistence {
   async listReceipts(code: string): Promise<RoomReceipt[]> {
     const rows = await this.client.command<string[] | null>(['LRANGE', receiptsKey(code), 0, -1]);
     return (rows ?? []).map(row => JSON.parse(row) as RoomReceipt);
+  }
+
+  async listFleetTrustKeys(): Promise<StoredFleetTrustKey[]> {
+    const ids = await this.client.command<string[] | null>(['SMEMBERS', fleetTrustIdsKey]);
+    if (!ids?.length) return [];
+    const rows = await this.client.command<Array<string | null>>(['MGET', ...ids.map(fleetTrustKey)]);
+    return rows.filter((row): row is string => row !== null).map(row => JSON.parse(row) as StoredFleetTrustKey)
+      .sort((left, right) => `${left.fleetId}\0${left.keyId}`.localeCompare(`${right.fleetId}\0${right.keyId}`));
+  }
+
+  async putFleetTrustKey(key: StoredFleetTrustKey): Promise<void> {
+    const id = encodeURIComponent(`${key.fleetId}\0${key.keyId}`);
+    await this.client.pipeline([
+      ['SET', fleetTrustKey(id), canonicalJson(key)],
+      ['SADD', fleetTrustIdsKey, id],
+    ]);
+  }
+
+  async deleteFleetTrustKey(fleetId: string, keyId: string): Promise<boolean> {
+    const id = encodeURIComponent(`${fleetId}\0${keyId}`);
+    const result = await this.client.pipeline<unknown>([
+      ['DEL', fleetTrustKey(id)],
+      ['SREM', fleetTrustIdsKey, id],
+    ]);
+    return Number(result[0]) === 1;
   }
 
   async close(): Promise<void> {}

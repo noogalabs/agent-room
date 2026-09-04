@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 function records() {
-  const rooms = new Map<string, Room>(); const receipts: any[] = [];
+  const rooms = new Map<string, Room>(); const receipts: any[] = []; const trustKeys: any[] = [];
   return {
     createRoom: vi.fn(async (room: Room) => { rooms.set(room.code, structuredClone(room)); }),
     getRoom: vi.fn(async (code: string) => structuredClone(rooms.get(code) ?? null)),
@@ -35,6 +35,9 @@ function records() {
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: any) => { if (receipts.some(item => item.id === value.id && item.roomCode === value.roomCode)) return false; receipts.push(value); return true; }),
     listReceipts: vi.fn(async (code: string) => receipts.filter(item => item.roomCode === code)),
+    listFleetTrustKeys: vi.fn(async () => structuredClone(trustKeys)),
+    putFleetTrustKey: vi.fn(async (key: any) => { trustKeys.push(structuredClone(key)); }),
+    deleteFleetTrustKey: vi.fn(async () => false),
   } as unknown as RoomRecordServer;
 }
 

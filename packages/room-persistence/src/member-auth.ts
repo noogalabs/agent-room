@@ -115,11 +115,13 @@ function parseProtected(encoded: string): { alg?: string; kid?: string; typ?: st
 }
 
 export class AgentCardVerifier {
-  private readonly trustKeys: readonly FleetTrustKey[];
+  private trustKeys: readonly FleetTrustKey[];
 
   constructor(trustKeys: readonly FleetTrustKey[], private readonly now: () => number = Date.now) {
     this.trustKeys = [...trustKeys];
   }
+
+  replaceTrustKeys(trustKeys: readonly FleetTrustKey[]): void { this.trustKeys = [...trustKeys]; }
 
   verifyWithLegacyFingerprint(signed: SignedAgentCard, scheme: MemberAuthScheme): {
     identity: AuthenticatedMemberIdentity;

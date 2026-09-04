@@ -62,6 +62,9 @@ class MemoryPersistence implements RoomPersistence {
   async deleteReceipt() { return false; }
   async appendLeaseEvent() { return false; }
   async listReceipts() { return []; }
+  async listFleetTrustKeys() { return []; }
+  async putFleetTrustKey() {}
+  async deleteFleetTrustKey() { return false; }
   async close() {}
 }
 

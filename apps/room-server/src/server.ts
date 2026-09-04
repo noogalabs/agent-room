@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { AgentCardVerifier, AuthenticatedRoomJoinServer, MemberJoinError, RoomRecordServer } from '@agent-room/room-persistence';
 import { extractArtifacts, type Message, type ReplyMode, type ReplyModeConfig, type Room, type RoomReport } from '@agent-room/shared';
-import { loadTrustStore } from './trust-store.js';
+import { hydrateTrustKeys, loadStoredTrustStore, TrustStoreError, validateStoredTrustKeys } from './trust-store.js';
 import { HumanSessionAuthority, HumanSessionError } from './human-sessions.js';
 import { canonicalHumanMessage, resolveSessionParticipant } from './human-message-identity.js';
 
@@ -26,7 +26,7 @@ async function body(req: IncomingMessage): Promise<unknown> {
 }
 
 function error(res: ServerResponse, value: unknown): void {
-  const code = value instanceof MemberJoinError || value instanceof HumanSessionError ? value.code : 'internal_error';
+  const code = value instanceof MemberJoinError || value instanceof HumanSessionError || value instanceof TrustStoreError ? value.code : 'internal_error';
   const status = code === 'room_not_found' ? 404 : code === 'internal_error' ? 500 : 400;
   reply(res, status, { error: code });
 }
@@ -50,9 +50,20 @@ export async function createHostedRoomServer(
   if (env.AGENT_ROOM_MEMBER_AUTH && env.AGENT_ROOM_MEMBER_AUTH !== 'required') {
     throw new MemberJoinError('member_auth_configuration_invalid', 'Hosted member authentication must be required.');
   }
-  const trustKeys = await loadTrustStore(env.AGENT_ROOM_TRUST_STORE);
   const rooms = await RoomRecordServer.fromEnvironment(env);
-  const verifier = new AgentCardVerifier(trustKeys);
+  let storedTrustKeys = await rooms.listFleetTrustKeys();
+  if (storedTrustKeys.length === 0) {
+    let seedTrustKeys;
+    try { seedTrustKeys = await loadStoredTrustStore(env.AGENT_ROOM_TRUST_STORE); }
+    catch (caught) { await rooms.close(); throw caught; }
+    for (const key of seedTrustKeys) await rooms.putFleetTrustKey(key);
+    storedTrustKeys = await rooms.listFleetTrustKeys();
+  }
+  const verifier = new AgentCardVerifier(hydrateTrustKeys(storedTrustKeys));
+  const refreshTrustKeys = async () => {
+    storedTrustKeys = await rooms.listFleetTrustKeys();
+    verifier.replaceTrustKeys(hydrateTrustKeys(storedTrustKeys));
+  };
   const joins = new AuthenticatedRoomJoinServer(rooms, verifier, 'required');
   const humanSecret = env.AGENT_ROOM_HUMAN_SESSION_SECRET;
   if (!humanSecret) throw new HumanSessionError('human_session_secret_required');
@@ -109,7 +120,7 @@ export async function createHostedRoomServer(
     try {
       const url = new URL(req.url ?? '/', 'http://room.invalid');
       if (req.method === 'GET' && url.pathname === '/health') {
-        return reply(res, 200, { ready: true, persistence: env.AGENT_ROOM_PERSISTENCE ?? 'redis', memberAuth: 'required', trustKeyCount: trustKeys.length });
+        return reply(res, 200, { ready: true, persistence: env.AGENT_ROOM_PERSISTENCE ?? 'redis', memberAuth: 'required', trustKeyCount: storedTrustKeys.length });
       }
       if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
         return await serveWeb(res, env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist', url.pathname);
@@ -250,6 +261,25 @@ export async function createHostedRoomServer(
         const requestedTtl = Number(url.searchParams.get('ttlMs') ?? 15 * 60_000);
         const ttlMs = Number.isSafeInteger(requestedTtl) && requestedTtl > 0 && requestedTtl <= 15 * 60_000 ? requestedTtl : 15 * 60_000;
         return reply(res, 201, await humans.issueWatch(decodeURIComponent(watchMatch[1]!), ttlMs));
+      }
+      const trustMatch = /^\/api\/rooms\/([^/]+)\/fleet-trust(?:\/([^/]+)\/([^/]+))?$/.exec(url.pathname);
+      if (trustMatch) {
+        const code = decodeURIComponent(trustMatch[1]!);
+        await authorizeRoomHost(req, code);
+        if (req.method === 'GET' && !trustMatch[2]) return reply(res, 200, storedTrustKeys);
+        if (req.method === 'POST' && !trustMatch[2]) {
+          const submitted = validateStoredTrustKeys(await body(req));
+          if (submitted.length !== 1) throw new TrustStoreError('trust_store_entry_invalid', 'Submit exactly one fleet trust key.');
+          const [key] = submitted;
+          await rooms.putFleetTrustKey(key!); await refreshTrustKeys();
+          return reply(res, 201, key);
+        }
+        if (req.method === 'DELETE' && trustMatch[2] && trustMatch[3]) {
+          const removed = await rooms.deleteFleetTrustKey(decodeURIComponent(trustMatch[2]), decodeURIComponent(trustMatch[3]));
+          await refreshTrustKeys();
+          return reply(res, 200, { removed });
+        }
+        return reply(res, 405, { error: 'method_not_allowed' });
       }
       const match = /^\/api\/rooms\/([^/]+)(?:\/(join|messages))?$/.exec(url.pathname);
       const reportMatch = /^\/api\/rooms\/([^/]+)\/report$/.exec(url.pathname);
