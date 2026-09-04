@@ -991,6 +991,12 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
       headers: { authorization: `Bearer ${rejoined.participantToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'messages', code }) });
     expect(rejoinedRead.status).toBe(200);
+    const oldTokenRead = await fetch(`${base}/api/room`, { method: 'POST',
+      headers: { authorization: `Bearer ${repeated.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'messages', code }) });
+    expect([oldTokenRead.status, await oldTokenRead.json()]).toStrictEqual([
+      400, { error: 'agent_session_revoked' },
+    ]);
     const removedAgain = await fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST',
       headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'remove', targetName: 'Agent Alpha', targetClient: 'cc' }) });
