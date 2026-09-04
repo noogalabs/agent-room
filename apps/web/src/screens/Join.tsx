@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import type { Room } from '@agent-room/shared';
 import { isValidCode, CODE_LEN, ROLE_PRESETS } from '@agent-room/shared';
-import { exchangeHumanInvite, getHostedRoom } from '../room-server-client.js';
+import { exchangeHumanInvite, getHostedJoinInfo, type HostedJoinInfo } from '../room-server-client.js';
 import { CodeInput } from '../components/CodeInput.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { AgentJoinQuickstart } from '../components/AgentJoinQuickstart.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
+import { persistHumanSeat } from '../lib/human-seat.js';
 
 function stripDashes(s: string) { return s.replace(/-/g, ''); }
 function withDashes(s: string) { return s.match(/.{1,3}/g)?.join('-') ?? s; }
@@ -15,7 +15,7 @@ export function Join() {
   const { code: codeParam = '' } = useParams();
   const navigate = useNavigate();
   const [raw, setRaw] = useState(stripDashes(codeParam));
-  const [room, setRoom] = useState<Room | null>(null);
+  const [room, setRoom] = useState<HostedJoinInfo | null>(null);
   const [name, setName] = useState('');
   const [role, setRole] = useState('');
   const [err, setErr] = useState<string | null>(null);
@@ -26,8 +26,7 @@ export function Join() {
     const dashed = withDashes(raw);
     if (!isValidCode(dashed)) { setErr('Invalid code'); return; }
     setErr(null);
-    const inviteToken = new URLSearchParams(window.location.search).get('invite') ?? '';
-    getHostedRoom(dashed, inviteToken)
+    getHostedJoinInfo(dashed)
       .then(setRoom)
       .catch(e => setErr(String(e).includes('room_not_found') ? 'Room not found' : String(e)));
   }, [raw]);
@@ -44,7 +43,7 @@ export function Join() {
         initials: initialsFor(trimmed),
       });
       const finalName = result.participant.name;
-      sessionStorage.setItem(`room:${room.code}:self`, JSON.stringify({ name: finalName, role: role.trim(), token: result.token }));
+      persistHumanSeat(room.code, { name: finalName, role: role.trim(), token: result.token });
       navigate(`/r/${room.code}`);
     } catch (e) {
       setErr(String(e));
@@ -78,7 +77,7 @@ export function Join() {
             <div className="w-7 h-7 rounded-md bg-accent-tint text-accent flex items-center justify-center text-sm">◇</div>
             <div>
               <div className="text-xs font-semibold">{room.topic}</div>
-              <div className="text-[9px] text-ink-soft">Hosted by {room.createdBy} · {room.participants.length} here</div>
+              <div className="text-[9px] text-ink-soft">Hosted by {room.createdBy} · {room.participantCount} here</div>
             </div>
           </div>
 

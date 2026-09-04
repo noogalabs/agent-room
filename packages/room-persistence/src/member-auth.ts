@@ -228,8 +228,10 @@ export class AuthenticatedRoomJoinServer {
         // once. A repeat join is also the safe opportunity to collapse those
         // rows without changing the surviving seat identity.
         if (matches.length > 1) {
-          const participants = room.participants.filter(item =>
-            item.authenticatedIdentity?.cardFingerprint !== identity!.cardFingerprint || item === existing);
+          const participants = room.participants.flatMap(item => {
+            if (item === existing) return [existing];
+            return item.authenticatedIdentity?.cardFingerprint === identity!.cardFingerprint ? [] : [item];
+          });
           const next = { ...room, version: room.version + 1, participants };
           if (!await this.rooms.updateRoom(code, room.version, next)) {
             throw new MemberJoinError('room_version_conflict', 'Room changed while the participant was rejoining.');

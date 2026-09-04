@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { Pool } from 'pg';
 import { RoomRecordServer, signAgentCard } from '@agent-room/room-persistence';
 import type { Room } from '@agent-room/shared';
 import { createHostedRoomServer, startHostedRoomServer } from './server.js';
@@ -45,12 +46,23 @@ function memoryRecords(initial = room()) {
       return true;
     }),
     updateRoomAndReplaceReceipt: vi.fn(async (_code: string, version: number, next: Room, receipt: typeof receipts[number], deleteId?: string) => {
-      if (refuseAtomicJoin || version !== current.version || receipts.some(item => item.id === receipt.id)) return false;
+      if (refuseAtomicJoin || refuseAtomicRemoval || version !== current.version || receipts.some(item => item.id === receipt.id)) return false;
       const deleteIndex = deleteId ? receipts.findIndex(item => item.id === deleteId) : -1;
       if (deleteId && deleteIndex < 0) return false;
       current = structuredClone(next);
       if (deleteIndex >= 0) receipts.splice(deleteIndex, 1);
       receipts.push(structuredClone(receipt));
+      return true;
+    }),
+    updateRoomAndReceipts: vi.fn(async (_code: string, version: number, next: Room,
+      deleteIds: readonly string[], appends: readonly typeof receipts[number][]) => {
+      if (refuseAtomicJoin || refuseAtomicRemoval || version !== current.version) return false;
+      const deleteIndexes = deleteIds.map(id => receipts.findIndex(item => item.id === id));
+      if (deleteIndexes.some(index => index < 0) || appends.some(receipt =>
+        !deleteIds.includes(receipt.id) && receipts.some(item => item.id === receipt.id))) return false;
+      current = structuredClone(next);
+      for (const index of [...deleteIndexes].sort((a, b) => b - a)) receipts.splice(index, 1);
+      receipts.push(...structuredClone(appends));
       return true;
     }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
@@ -249,7 +261,7 @@ describe('hosted room production entry', () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const inviteResponse = await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } });
+    const inviteResponse = await fetch(`${base}/api/rooms/ROOM1/human-invites?singleUse=true`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } });
     expect(inviteResponse.status).toBe(201);
     const invite = await inviteResponse.json() as { id: string; token: string; joinPath: string };
     expect(invite.joinPath).toBe(`/j/ROOM1?invite=${encodeURIComponent(invite.token)}`);
@@ -370,26 +382,93 @@ describe('hosted room production entry', () => {
     expect(memory.records.updateRoom).not.toHaveBeenCalled();
   });
 
-  it('refuses a still-signed human session whose participant was removed from the room', async () => {
+  it('refuses the complete human and agent operation matrix after host removal', async () => {
+    const trust = await trustFile();
+    const seats = [
+      { kind: 'human' as const, name: 'Sam', client: 'web' as const, expected: 'human_session_revoked' },
+      { kind: 'agent' as const, name: 'Agent A', client: 'cc' as const, expected: 'agent_session_revoked' },
+    ];
+    for (const seat of seats) {
+      const memory = memoryRecords();
+      vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValueOnce(memory.records);
+      const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+      let token: string;
+      if (seat.kind === 'human') {
+        const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, {
+          method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+        })).json() as { token: string };
+        token = (await (await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ inviteToken: invite.token, name: seat.name, role: 'Lead', color: '#123456', initials: 'SL' }),
+        })).json() as { token: string }).token;
+      } else {
+        const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: seat.name, url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+        token = (await (await fetch(`${base}/api/rooms/ROOM1/join`, {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ participant: { name: seat.name, role: '', color: '#000000', initials: 'AA', client: seat.client }, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+        })).json() as { participantToken: string }).participantToken;
+      }
+      expect((await fetch(`${base}/api/rooms/ROOM1/actions`, {
+        method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'remove', targetName: seat.name, targetClient: seat.client }),
+      })).status).toBe(200);
+      for (const action of ['send', 'messages', 'get'] as const) {
+        const response = await fetch(`${base}/api/room`, {
+          method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ action, code: 'ROOM1', cursor: 0,
+            message: { id: 1, type: 'msg', name: seat.name, role: seat.kind, initials: 'XX', color: '#000000', client: seat.client, text: 'after removal', time: 1 } }),
+        });
+        expect([seat.kind, action, response.status, await response.json()]).toStrictEqual([
+          seat.kind, action, 400, { error: seat.expected },
+        ]);
+      }
+    }
+  });
+
+  it('fails human self-leave without changing the room or receipts when atomic cleanup refuses', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    (memory.records.updateRoomAndReceipts as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+      method: 'DELETE', headers: { authorization: `Bearer ${session.token}` },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
+  });
+
+  it('fails human join without consuming its invite or partially adding roster state', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
-    const session = await (await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Sam', role: 'Lead', color: '#123456', initials: 'SL' }) })).json() as { token: string; participant: { role: string; initials: string; color: string } };
-    const post = () => fetch(`${base}/api/rooms/ROOM1/messages`, {
-      method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ id: 1, type: 'msg', name: 'Sam', role: session.participant.role, initials: session.participant.initials, color: session.participant.color, client: 'web', text: 'hello', time: 10 }),
+    const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites?singleUse=true`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+    })).json() as { token: string };
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    (memory.records.updateRoomAndReceipts as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inviteToken: invite.token, name: 'Atomic Human', role: 'Lead' }),
     });
-    expect((await post()).status).toBe(201);
-    const removed = await fetch(`${base}/api/rooms/ROOM1/actions`, {
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
+  });
+
+  it('fails host removal without changing the room or receipts when atomic cleanup refuses', async () => {
+    const { base, memory } = await joinedHuman();
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    (memory.records.updateRoomAndReceipts as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/rooms/ROOM1/actions`, {
       method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'remove', targetName: 'Sam', targetClient: 'web' }),
     });
-    expect(removed.status).toBe(200);
-    expect(memory.current().participants.some(item => item.name === 'Sam')).toBe(false);
-    const after = await post();
-    expect(after.status).toBe(400);
-    expect(await after.json()).toStrictEqual({ error: 'human_membership_required' });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
   });
 
   it('checks human name and historical agent roster before burning an invite', async () => {
@@ -417,7 +496,7 @@ describe('hosted room production entry', () => {
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
     const creator = await (await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01' }) })).json() as { token: string; createPath: string };
-    expect(creator.createPath).toContain('creator=');
+    expect(creator.createPath).toBe(`/new?code=WEB01&creator=${encodeURIComponent(creator.token)}`);
     const createdResponse = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01', topic: 'demo', name: 'David', role: 'host', color: '#123456', initials: 'DH' }) });
     expect(createdResponse.status).toBe(201);
     const created = await createdResponse.json() as { token: string; participant: Room['participants'][number] };
@@ -435,6 +514,68 @@ describe('hosted room production entry', () => {
     const action = await fetch(`${base}/api/rooms/WEB01/actions`, { method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'system-message', message: forged }) });
     expect(action.status).toBe(200);
     expect(memory.records.appendMessage).toHaveBeenCalledWith('WEB01', { id: 3, type: 'sys', name: 'David', role: 'host', initials: 'DH', color: '#123456', client: 'web', text: 'host note', time: 3, attachments: undefined });
+  });
+
+  it('keeps a room-lifetime human invite reusable, revokes only future joins, refreshes presence, and frees a seat on leave', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const issued = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+    })).json() as { id: string; token: string; expiresAt: number };
+    expect(issued.expiresAt).toBe(Number.MAX_SAFE_INTEGER);
+    const joinHuman = async (name: string, inviteToken = issued.token) => {
+      const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inviteToken, name, role: '', color: '#123456', initials: name.slice(0, 2).toUpperCase() }),
+      });
+      return { response, body: await response.json() as { token: string; participant: Room['participants'][number]; error?: string } };
+    };
+    const alice = await joinHuman('Alice'); const bob = await joinHuman('Bob');
+    expect(alice.response.status).toBe(200); expect(bob.response.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Alice', 'Bob']);
+
+    const beforePresence = memory.current().participants[0]!.lastSeenAt;
+    await new Promise(resolve => setTimeout(resolve, 2));
+    const presence = await fetch(`${base}/api/rooms/ROOM1/human-presence`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}` } });
+    expect(presence.status).toBe(200);
+    expect(memory.current().participants[0]!.lastSeenAt).toBeGreaterThan(beforePresence);
+
+    await fetch(`${base}/api/rooms/ROOM1/human-invites/${issued.id}`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
+    const existingPost = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 90, type: 'msg', name: 'Alice', role: '', initials: 'AL', color: '#123456', client: 'web', text: 'still seated', time: 90 }) });
+    expect(existingPost.status).toBe(201);
+    expect((await joinHuman('Charlie')).body).toMatchObject({ error: 'human_invite_revoked' });
+
+    const leave = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'DELETE', headers: { authorization: `Bearer ${alice.body.token}` } });
+    expect(leave.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Bob']);
+    expect(memory.receipts().some(item => item.id === `member-roster:${alice.body.participant.authenticatedIdentity!.cardFingerprint}`)).toBe(false);
+    expect(memory.receipts()).toContainEqual(expect.objectContaining({
+      id: `human-session:${alice.body.participant.authenticatedIdentity!.cardFingerprint}:revoked`,
+      payload: expect.objectContaining({ event: 'human_session_revoked', revokedAt: expect.any(Number) }),
+    }));
+    const departedPost = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 91, type: 'msg', name: 'Alice', role: '', initials: 'AL', color: '#123456', client: 'web', text: 'departed', time: 91 }) });
+    expect(await departedPost.json()).toStrictEqual({ error: 'human_session_revoked' });
+    const revokedRejoin = await joinHuman('Alice');
+    expect(revokedRejoin.response.status).toBe(400);
+    expect(revokedRejoin.body).toMatchObject({ error: 'human_invite_revoked' });
+
+    const replacementInvite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    const rejoined = await joinHuman('Alice', replacementInvite.token);
+    expect(rejoined.response.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name).sort()).toEqual(['Alice', 'Bob']);
+  });
+
+  it('lets a person with the room code use an active room-lifetime invite without exposing the room record', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } });
+    const info = await fetch(`${base}/api/rooms/ROOM1/join-info`);
+    expect(await info.json()).toStrictEqual({ code: 'ROOM1', topic: 'test', createdBy: 'host', status: 'active', participantCount: 0 });
+    const joined = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Code Guest', role: '', color: '#123456', initials: 'CG' }) });
+    expect(joined.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Code Guest']);
   });
 
   it('refuses unauthenticated browser creation and a signed overwrite of a live room', async () => {
@@ -593,9 +734,10 @@ describe('hosted room production entry', () => {
     });
 
     expect((await joinAgent(ceeCard)).status).toBe(200);
+    expect((memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[4]).toBeUndefined();
     expect(memory.receipts().map(item => item.id)).toContain(legacyReceiptId);
     const authority = new HumanSessionAuthority(memory.records, 'h'.repeat(48), 'hosted-room');
-    const beeToken = authority.issueAgentSession('ROOM1', bee.authenticatedIdentity).token;
+    const beeToken = (await authority.issueAgentSession('ROOM1', bee.authenticatedIdentity)).token;
     const leave = await fetch(`${base}/api/room`, { method: 'POST',
       headers: { authorization: `Bearer ${beeToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'removeParticipant', code: 'ROOM1', requesterName: bee.name,
@@ -626,6 +768,20 @@ describe('hosted room production entry', () => {
     await expect(authority.verifySession(legacy, 'ROOM1')).rejects.toMatchObject({ name: 'human_session_invalid' });
   });
 
+  it('issues a rejoined agent strictly after an identity watermark in the same millisecond', async () => {
+    const memory = memoryRecords(); const now = 1_000;
+    const identity = { cardFingerprint: 'agent-watermark', fleetId: 'fleet-a', cardName: 'Agent Watermark',
+      scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: now };
+    await memory.records.appendReceipt({ id: `human-session:${identity.cardFingerprint}:revoked`,
+      roomCode: 'ROOM1', kind: 'receipt', createdAt: now,
+      payload: { event: 'human_session_revoked', identityFingerprint: identity.cardFingerprint, revokedAt: now } });
+    const authority = new HumanSessionAuthority(memory.records, 'w'.repeat(48), 'hosted-room', () => now);
+    const session = await authority.issueAgentSession('ROOM1', identity);
+    await expect(authority.verifyAgentSession(session.token, 'ROOM1')).resolves.toMatchObject({
+      identityFingerprint: identity.cardFingerprint, issuedAt: now + 1,
+    });
+  });
+
   it('consumer census pins the durable server as the production image entry', async () => {
     const root = new URL('../../../', import.meta.url);
     const docker = await readFile(new URL('Dockerfile', root), 'utf8');
@@ -634,6 +790,8 @@ describe('hosted room production entry', () => {
     const entry = await readFile(new URL('apps/room-server/src/server.ts', root), 'utf8');
     const joinScreen = await readFile(new URL('apps/web/src/screens/Join.tsx', root), 'utf8');
     const lobbyScreen = await readFile(new URL('apps/web/src/screens/Lobby.tsx', root), 'utf8');
+    const createScreen = await readFile(new URL('apps/web/src/screens/CreateMeeting.tsx', root), 'utf8');
+    const roomScreen = await readFile(new URL('apps/web/src/screens/Room.tsx', root), 'utf8');
     const roomHook = await readFile(new URL('apps/web/src/hooks/useRoom.ts', root), 'utf8');
     const webClient = await readFile(new URL('apps/web/src/room-server-client.ts', root), 'utf8');
     expect(docker).toContain('CMD ["node", "apps/room-server/dist/index.js"]');
@@ -658,7 +816,15 @@ describe('hosted room production entry', () => {
     expect(joinScreen).toContain('exchangeHumanInvite');
     expect(lobbyScreen).toContain('issueHostedInvite');
     expect(lobbyScreen).toContain('invite.joinPath');
+    expect(lobbyScreen).toContain('revokeHostedInvite');
     expect(lobbyScreen).not.toContain('`${window.location.origin}/j/${code}`');
+    expect(createScreen).toContain('persistHumanSeat');
+    expect(joinScreen).toContain('persistHumanSeat');
+    expect(roomScreen).toContain('loadHumanSeat');
+    expect(roomScreen).toContain('touchHostedHumanPresence');
+    expect(roomScreen).toContain('60_000');
+    expect(roomScreen).toContain('leaveHostedHumanRoom');
+    expect(roomScreen).toContain('clearHumanSeat');
     expect(roomHook).toContain('appendHostedMessage');
     expect(`${joinScreen}\n${roomHook}`).not.toContain('@agent-room/upstash-client');
     expect(webClient).toContain('ENV.roomServerBaseUrl');
@@ -689,6 +855,85 @@ describe('hosted room production entry', () => {
 
 const postgresUrl = process.env.TEST_POSTGRES_URL;
 describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () => {
+  async function rejectReceiptAppendFor(code: string): Promise<() => Promise<void>> {
+    const admin = new Pool({ connectionString: postgresUrl });
+    const suffix = `${process.pid}_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const functionName = `reject_receipt_append_${suffix}`;
+    const triggerName = `reject_receipt_append_${suffix}`;
+    const literalCode = code.replaceAll("'", "''");
+    await admin.query(`CREATE FUNCTION ${functionName}() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.room_code = '${literalCode}' THEN RAISE EXCEPTION 'synthetic append-leg failure'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await admin.query(`CREATE TRIGGER ${triggerName} BEFORE INSERT ON agent_room_receipts
+      FOR EACH ROW EXECUTE FUNCTION ${functionName}()`);
+    return async () => {
+      await admin.query(`DROP TRIGGER IF EXISTS ${triggerName} ON agent_room_receipts`);
+      await admin.query(`DROP FUNCTION IF EXISTS ${functionName}()`);
+      await admin.end();
+    };
+  }
+
+  async function postgresHosted(code: string) {
+    const trust = await trustFile();
+    const hosted = await createHostedRoomServer(hostedEnv(trust.path, {
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl,
+    }));
+    opened.push(hosted); await new Promise<void>(resolve => hosted.server.listen(0, '127.0.0.1', resolve));
+    const address = hosted.server.address(); if (!address || typeof address === 'string') throw new Error('listen');
+    const base = `http://127.0.0.1:${address.port}`;
+    expect((await fetch(`${base}/api/rooms`, { method: 'POST', headers: {
+      authorization: 'Bearer host-test-token', 'content-type': 'application/json',
+    }, body: JSON.stringify({ ...room(), code }) })).status).toBe(201);
+    return { base, hosted, trust };
+  }
+
+  async function expectAppendFailureRollsBack(
+    hosted: Awaited<ReturnType<typeof createHostedRoomServer>>, code: string, action: () => Promise<Response>,
+  ) {
+    const beforeRoom = await hosted.rooms.getRoom(code); const beforeReceipts = await hosted.rooms.listReceipts(code);
+    const restore = await rejectReceiptAppendFor(code);
+    try {
+      const response = await action();
+      expect(response.status).not.toBe(200);
+      expect(await hosted.rooms.getRoom(code)).toStrictEqual(beforeRoom);
+      expect(await hosted.rooms.listReceipts(code)).toStrictEqual(beforeReceipts);
+    } finally { await restore(); }
+  }
+
+  it('rolls back human join when its real Postgres roster-receipt append leg fails', async () => {
+    const code = `HJ${Date.now()}`; const { base, hosted } = await postgresHosted(code);
+    const invite = await (await fetch(`${base}/api/rooms/${code}/human-invites?singleUse=true`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+    })).json() as { token: string };
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/human-session`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inviteToken: invite.token, name: 'Append Human', role: 'human' }),
+    }));
+  });
+
+  it('rolls back agent self-leave when its real Postgres revocation append leg fails', async () => {
+    const code = `AL${Date.now()}`; const { base, hosted, trust } = await postgresHosted(code);
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent Leave', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const joined = await (await fetch(`${base}/api/rooms/${code}/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant: { name: card.name, role: '', color: '#000000', initials: 'AL', client: 'cc' }, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }) })).json() as { participantToken: string };
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'removeParticipant', code, targetName: card.name, targetClient: 'cc' }) }));
+  });
+
+  it('rolls back human self-leave when its real Postgres revocation append leg fails', async () => {
+    const code = `HL${Date.now()}`; const { base, hosted } = await postgresHosted(code);
+    const invite = await (await fetch(`${base}/api/rooms/${code}/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    const joined = await (await fetch(`${base}/api/rooms/${code}/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Human Leave' }) })).json() as { token: string };
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/human-session`, { method: 'DELETE', headers: { authorization: `Bearer ${joined.token}` } }));
+  });
+
+  it('rolls back host removal when its real Postgres revocation append leg fails', async () => {
+    const code = `HR${Date.now()}`; const { base, hosted } = await postgresHosted(code);
+    const invite = await (await fetch(`${base}/api/rooms/${code}/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    await fetch(`${base}/api/rooms/${code}/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Host Removed' }) });
+    await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ action: 'remove', targetName: 'Host Removed', targetClient: 'web' }) }));
+  });
+
   it('creates, reads, and authenticates a member through the real hosted entry', async () => {
     const trust = await trustFile(); const code = `PG${Date.now()}`;
     const hosted = await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl }));
@@ -742,6 +987,33 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     expect(rejoined.participantToken).not.toBe(repeated.participantToken);
     expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name).sort()).toEqual(['Agent Alpha', 'Agent Beta']);
     expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(2);
+    const rejoinedRead = await fetch(`${base}/api/room`, { method: 'POST',
+      headers: { authorization: `Bearer ${rejoined.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'messages', code }) });
+    expect(rejoinedRead.status).toBe(200);
+    const oldTokenRead = await fetch(`${base}/api/room`, { method: 'POST',
+      headers: { authorization: `Bearer ${repeated.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'messages', code }) });
+    expect([oldTokenRead.status, await oldTokenRead.json()]).toStrictEqual([
+      400, { error: 'agent_session_revoked' },
+    ]);
+    const removedAgain = await fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST',
+      headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', targetName: 'Agent Alpha', targetClient: 'cc' }) });
+    expect(removedAgain.status).toBe(200);
+    for (const action of ['messages', 'get', 'send'] as const) {
+      const revokedAgain = await fetch(`${base}/api/room`, { method: 'POST',
+        headers: { authorization: `Bearer ${rejoined.participantToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ action, code, message: { id: 42, type: 'msg', name: 'Agent Alpha',
+          role: 'agent', initials: 'AA', color: '#000000', client: 'cc', text: 'after kick', time: 42 } }) });
+      expect([action, revokedAgain.status, await revokedAgain.json()]).toStrictEqual([
+        action, 400, { error: 'agent_session_revoked' },
+      ]);
+    }
+    const idempotentRemoval = await fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST',
+      headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', targetName: 'Agent Alpha', targetClient: 'cc' }) });
+    expect(idempotentRemoval.status).toBe(200);
   });
 
   it('converges simultaneous first joins of one signed identity on one Postgres seat with two fresh tokens', async () => {

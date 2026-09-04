@@ -64,6 +64,41 @@ const ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT = [
   'return 1',
 ].join('\n');
 
+const ROOM_CAS_AND_RECEIPTS_SCRIPT = [
+  "local raw = redis.call('GET', KEYS[1])",
+  'if not raw then return 0 end',
+  'local current = cjson.decode(raw)',
+  'if tonumber(current.version) ~= tonumber(ARGV[1]) then return 0 end',
+  'local deletes = cjson.decode(ARGV[3])',
+  'local appends = cjson.decode(ARGV[4])',
+  "local rows = redis.call('LRANGE', KEYS[2], 0, -1)",
+  'local delete_rows = {}',
+  'for _, id in ipairs(deletes) do',
+  "  if redis.call('SISMEMBER', KEYS[3], id) ~= 1 then return 0 end",
+  '  local matched = nil',
+  '  for _, row in ipairs(rows) do if cjson.decode(row).id == id then matched = row break end end',
+  '  if not matched then return 0 end',
+  '  delete_rows[id] = matched',
+  'end',
+  'for _, receipt in ipairs(appends) do',
+  '  local replacing = false',
+  '  for _, id in ipairs(deletes) do if id == receipt.id then replacing = true break end end',
+  "  if not replacing and redis.call('SISMEMBER', KEYS[3], receipt.id) == 1 then return 0 end",
+  'end',
+  "redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')",
+  'for _, id in ipairs(deletes) do',
+  "  redis.call('LREM', KEYS[2], 1, delete_rows[id])",
+  "  redis.call('SREM', KEYS[3], id)",
+  'end',
+  'for _, receipt in ipairs(appends) do',
+  "  redis.call('SADD', KEYS[3], receipt.id)",
+  "  redis.call('RPUSH', KEYS[2], cjson.encode(receipt))",
+  'end',
+  "redis.call('EXPIREAT', KEYS[3], tonumber(ARGV[5]))",
+  "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[5]))",
+  'return 1',
+].join('\n');
+
 const BOARD_CAS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   "if ARGV[1] == 'absent' then",
@@ -190,6 +225,19 @@ export class RedisRoomPersistence implements RoomPersistence {
       'EVAL', ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT, '3', roomKey(code), receiptsKey(code), receiptIdsKey(code),
       String(expectedVersion), JSON.stringify(next), receipt.id, canonicalJson(receipt), deleteReceiptId ?? '',
       String(expiresAt),
+    ]);
+    return Number(result) === 1;
+  }
+
+  async compareAndSwapRoomAndReceipts(
+    code: string, expectedVersion: number, next: Room,
+    deleteReceiptIds: readonly string[], appendReceipts: readonly RoomReceipt[],
+  ): Promise<boolean> {
+    const expiresAt = Math.floor(next.createdAt / 1000) + ROOM_TTL_SECONDS;
+    const result = await this.client.command<number>([
+      'EVAL', ROOM_CAS_AND_RECEIPTS_SCRIPT, '3', roomKey(code), receiptsKey(code), receiptIdsKey(code),
+      String(expectedVersion), JSON.stringify(next), JSON.stringify(deleteReceiptIds),
+      canonicalJson(appendReceipts), String(expiresAt),
     ]);
     return Number(result) === 1;
   }

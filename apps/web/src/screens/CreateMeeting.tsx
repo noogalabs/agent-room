@@ -5,6 +5,7 @@ import { createHostedBrowserRoom } from '../room-server-client.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { ROOM_TEMPLATES, roleLabelFor, templateById } from '../lib/templates.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
+import { persistHumanSeat } from '../lib/human-seat.js';
 
 const TEMPLATE_KEY = 'room:pending-template:';
 
@@ -45,7 +46,7 @@ export function CreateMeeting() {
       if (!creatorToken || !authorizedCode) throw new Error('A signed creator link is required.');
       const code = authorizedCode;
       const created = await createHostedBrowserRoom(creatorToken, { code, topic: topic.trim(), name: name.trim(), role: role.trim(), color: colorForName(name.trim()), initials: initialsFor(name.trim()) });
-      sessionStorage.setItem(`room:${code}:self`, JSON.stringify({ name: name.trim(), role: 'human', token: created.token }));
+      persistHumanSeat(code, { name: name.trim(), role: 'human', token: created.token });
       // Stash the chosen template so Lobby (and the room itself) can post the
       // opening message + show suggested roles. We use sessionStorage and not
       // a route param so re-opens or refreshes don't re-trigger the opener.

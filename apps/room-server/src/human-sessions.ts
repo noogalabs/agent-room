@@ -14,8 +14,11 @@ interface Capability {
   name?: string;
   role?: string;
   inviteId?: string;
+  inviteRevocationApplies?: boolean;
+  reusable?: boolean;
   client?: 'web' | 'cc';
   identityFingerprint?: string;
+  issuedAt?: number;
 }
 
 function encode(value: unknown): string {
@@ -57,18 +60,31 @@ export class HumanSessionAuthority {
     return payload;
   }
 
-  async issueInvite(roomCode: string, ttlMs = 15 * 60_000): Promise<{ id: string; token: string; expiresAt: number }> {
+  async issueInvite(roomCode: string, ttlMs = 15 * 60_000, reusable = false): Promise<{ id: string; token: string; expiresAt: number }> {
     const room = await this.rooms.getRoom(roomCode);
     if (!room || room.status !== 'active') throw new HumanSessionError('room_not_found');
     const id = randomBytes(18).toString('base64url');
-    const expiresAt = this.now() + ttlMs;
-    const receipt: RoomReceipt = { id: `human-invite:${id}:issued`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_issued', inviteId: id, expiresAt } };
+    const expiresAt = reusable ? Number.MAX_SAFE_INTEGER : this.now() + ttlMs;
+    const receipt: RoomReceipt = { id: `human-invite:${id}:issued`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_issued', inviteId: id, expiresAt, reusable } };
     if (!await this.rooms.appendReceipt(receipt)) throw new HumanSessionError('human_invite_collision');
-    return { id, expiresAt, token: this.sign({ purpose: 'invite', roomCode, id, expiresAt }) };
+    return { id, expiresAt, token: this.sign({ purpose: 'invite', roomCode, id, expiresAt, reusable }) };
   }
 
   async revokeInvite(roomCode: string, id: string): Promise<void> {
     await this.rooms.appendReceipt({ id: `human-invite:${id}:revoked`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_revoked', inviteId: id } });
+  }
+
+  async sessionRevocationChange(roomCode: string, identityFingerprint: string): Promise<{
+    deleteReceiptIds: string[]; receipt: RoomReceipt;
+  }> {
+    const id = `human-session:${identityFingerprint}:revoked`;
+    const existing = (await this.rooms.listReceipts(roomCode)).find(item => item.id === id);
+    const revokedAt = Math.max(this.now(), Number(existing?.payload.revokedAt ?? -1) + 1);
+    return {
+      deleteReceiptIds: existing ? [id] : [],
+      receipt: { id, roomCode, kind: 'receipt', createdAt: revokedAt,
+        payload: { event: 'human_session_revoked', identityFingerprint, revokedAt } },
+    };
   }
 
   async issueWatch(roomCode: string, ttlMs = 15 * 60_000): Promise<{ token: string; expiresAt: number }> {
@@ -90,15 +106,27 @@ export class HumanSessionAuthority {
     return creator;
   }
 
-  async exchangeInvite(roomCode: string, token: string, name: string, _role: string, creator = false): Promise<{ token: string; expiresAt: number; identity: AuthenticatedMemberIdentity }> {
-    const invite = this.verify(token, 'invite');
-    if (invite.roomCode !== roomCode || !name.trim()) throw new HumanSessionError('human_invite_invalid');
+  async exchangeInvite(roomCode: string, token: string, name: string, _role: string, creator = false): Promise<{ token: string; expiresAt: number; identity: AuthenticatedMemberIdentity; redeemedReceipt?: RoomReceipt }> {
     const receipts = await this.rooms.listReceipts(roomCode);
+    let invite: Capability;
+    if (token) {
+      invite = this.verify(token, 'invite');
+    } else {
+      const issued = [...receipts].reverse().find(item => item.payload.event === 'human_invite_issued' && item.payload.reusable === true &&
+        !receipts.some(other => other.id === `human-invite:${String(item.payload.inviteId)}:revoked`));
+      if (!issued) throw new HumanSessionError('human_invite_required');
+      invite = { purpose: 'invite', roomCode, id: String(issued.payload.inviteId),
+        expiresAt: Number(issued.payload.expiresAt), reusable: true };
+    }
+    if (invite.roomCode !== roomCode || !name.trim()) throw new HumanSessionError('human_invite_invalid');
     if (receipts.some(item => item.id === `human-invite:${invite.id}:revoked`)) throw new HumanSessionError('human_invite_revoked');
-    const redeemed: RoomReceipt = { id: `human-invite:${invite.id}:redeemed`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_redeemed', inviteId: invite.id } };
-    if (!await this.rooms.appendReceipt(redeemed)) throw new HumanSessionError('human_invite_used');
+    const redeemedReceipt: RoomReceipt | undefined = invite.reusable ? undefined : {
+      id: `human-invite:${invite.id}:redeemed`, roomCode, kind: 'receipt', createdAt: this.now(),
+      payload: { event: 'human_invite_redeemed', inviteId: invite.id },
+    };
+    if (redeemedReceipt && receipts.some(item => item.id === redeemedReceipt.id)) throw new HumanSessionError('human_invite_used');
     const id = randomBytes(18).toString('base64url');
-    const expiresAt = this.now() + 8 * 60 * 60_000;
+    const expiresAt = invite.reusable ? Number.MAX_SAFE_INTEGER : this.now() + 8 * 60 * 60_000;
     const cleanName = name.trim();
     const identity: AuthenticatedMemberIdentity = {
       cardFingerprint: createHash('sha256').update(this.issuer).update('\0').update(id).digest('hex'),
@@ -108,13 +136,17 @@ export class HumanSessionAuthority {
       keyId: 'host-human-session',
       verifiedAt: this.now(),
     };
-    return { expiresAt, identity, token: this.sign({ purpose: 'session', roomCode, id, expiresAt, name: cleanName, role: creator ? 'host' : 'human', inviteId: invite.id, client: 'web', identityFingerprint: identity.cardFingerprint }) };
+    const issuedAt = this.now();
+    return { expiresAt, identity, redeemedReceipt, token: this.sign({ purpose: 'session', roomCode, id, issuedAt, expiresAt, name: cleanName, role: creator ? 'host' : 'human', inviteId: invite.id, inviteRevocationApplies: !invite.reusable, client: 'web', identityFingerprint: identity.cardFingerprint }) };
   }
 
-  issueAgentSession(roomCode: string, identity: AuthenticatedMemberIdentity, ttlMs = 8 * 60 * 60_000): { token: string; expiresAt: number } {
-    const expiresAt = this.now() + ttlMs;
+  async issueAgentSession(roomCode: string, identity: AuthenticatedMemberIdentity, ttlMs = 8 * 60 * 60_000): Promise<{ token: string; expiresAt: number }> {
+    const receipts = await this.rooms.listReceipts(roomCode);
+    const watermark = receipts.find(item => item.id === `human-session:${identity.cardFingerprint}:revoked`);
+    const issuedAt = Math.max(this.now(), Number(watermark?.payload.revokedAt ?? -1) + 1);
+    const expiresAt = issuedAt + ttlMs;
     return { expiresAt, token: this.sign({ purpose: 'agent', roomCode,
-      id: randomBytes(18).toString('base64url'), identityFingerprint: identity.cardFingerprint,
+      id: randomBytes(18).toString('base64url'), issuedAt, identityFingerprint: identity.cardFingerprint,
       expiresAt, name: identity.cardName, role: 'agent', client: 'cc' }) };
   }
 
@@ -126,15 +158,20 @@ export class HumanSessionAuthority {
     if (signed.purpose !== 'session') throw new HumanSessionError('human_session_invalid');
     if (signed.expiresAt <= this.now()) throw new HumanSessionError('human_session_expired');
     const session = signed;
-    if (session.roomCode !== roomCode || !session.name || !session.inviteId || !session.identityFingerprint) throw new HumanSessionError('human_session_invalid');
+    if (session.roomCode !== roomCode || !session.name || !session.inviteId || !session.identityFingerprint || session.issuedAt === undefined) throw new HumanSessionError('human_session_invalid');
     const receipts = await this.rooms.listReceipts(roomCode);
-    if (receipts.some(item => item.id === `human-invite:${session.inviteId}:revoked`)) throw new HumanSessionError('human_session_revoked');
+    if (session.inviteRevocationApplies !== false && receipts.some(item => item.id === `human-invite:${session.inviteId}:revoked`)) throw new HumanSessionError('human_session_revoked');
+    const watermark = receipts.find(item => item.id === `human-session:${session.identityFingerprint}:revoked`);
+    if (Number(watermark?.payload.revokedAt ?? -1) >= session.issuedAt) throw new HumanSessionError('human_session_revoked');
     return session;
   }
 
-  verifyAgentSession(token: string, roomCode: string): Capability {
+  async verifyAgentSession(token: string, roomCode: string): Promise<Capability> {
     const session = this.verify(token, 'agent');
-    if (session.roomCode !== roomCode || !session.name || !session.identityFingerprint || session.client !== 'cc') throw new HumanSessionError('agent_session_invalid');
+    if (session.roomCode !== roomCode || !session.name || !session.identityFingerprint || session.issuedAt === undefined || session.client !== 'cc') throw new HumanSessionError('agent_session_invalid');
+    const receipts = await this.rooms.listReceipts(roomCode);
+    const watermark = receipts.find(item => item.id === `human-session:${session.identityFingerprint}:revoked`);
+    if (Number(watermark?.payload.revokedAt ?? -1) >= session.issuedAt) throw new HumanSessionError('agent_session_revoked');
     return session;
   }
 
@@ -149,12 +186,12 @@ export class HumanSessionAuthority {
       }
       return signed;
     }
-    if (signed.purpose === 'agent') return this.verifyAgentSession(token, roomCode);
+    if (signed.purpose === 'agent') return await this.verifyAgentSession(token, roomCode);
     return this.verifySession(token, roomCode);
   }
 
   async verifyMemberSession(token: string, roomCode: string): Promise<Capability> {
     const signed = this.verifySigned(token);
-    return signed.purpose === 'agent' ? this.verifyAgentSession(token, roomCode) : this.verifySession(token, roomCode);
+    return signed.purpose === 'agent' ? await this.verifyAgentSession(token, roomCode) : this.verifySession(token, roomCode);
   }
 }

@@ -8,24 +8,15 @@ import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
-import { appendHostedSystemMessage, createHostedReport, directHostedInvoke, endHostedRoom, getHostedTurnState, reactivateHostedRoom, removeHostedParticipant, setHostedMuted, setHostedReplyMode, skipHostedCurrent, type HostedTurnState } from '../room-server-client.js';
+import { appendHostedSystemMessage, createHostedReport, directHostedInvoke, endHostedRoom, getHostedTurnState, leaveHostedHumanRoom, reactivateHostedRoom, removeHostedParticipant, setHostedMuted, setHostedReplyMode, skipHostedCurrent, touchHostedHumanPresence, type HostedTurnState } from '../room-server-client.js';
 import { copyText } from '../lib/copy.js';
 import { templateById } from '../lib/templates.js';
 import { ALLOWED_ATTACHMENT_TYPES, MAX_ATTACHMENTS_PER_MESSAGE, deleteRoomBlobs, formatBytes, uploadAttachment } from '../lib/upload.js';
+import { clearHumanSeat, loadHumanSeat, type StoredHumanSeat } from '../lib/human-seat.js';
 
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour — long enough that humans + agents discussing intermittently don't trip it
 const AUTO_CLOSE_COUNTDOWN = 5;          // seconds
-interface SelfIdentity { name: string; role: string; token: string }
-
-function readStoredSelf(code: string): SelfIdentity | null {
-  const stored = sessionStorage.getItem(`room:${code}:self`);
-  if (!stored) return null;
-  try {
-    return JSON.parse(stored) as SelfIdentity;
-  } catch {
-    return null;
-  }
-}
+type SelfIdentity = StoredHumanSeat;
 
 // Cap auto-grow at ~8 lines so the input never eats the whole feed.
 const TEXTAREA_MAX_HEIGHT = 200;
@@ -39,7 +30,7 @@ export function Room() {
   // someone forwarded after pruning the path), we redirect to /j/CODE
   // below. We previously "recovered" by becoming room.createdBy, which
   // silently impersonated the host for any unknown visitor.
-  const [self, _setSelf] = useState<SelfIdentity | null>(() => readStoredSelf(code));
+  const [self, _setSelf] = useState<SelfIdentity | null>(() => loadHumanSeat(code));
   useEffect(() => {
     if (!self) navigate(`/j/${code}`, { replace: true });
   }, [self, code, navigate]);
@@ -55,6 +46,7 @@ export function Room() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
+  const lastPresenceAtRef = useRef(0);
 
   // Auto-grow the textarea: shrink to min, then expand to scrollHeight up to max.
   // Runs after every value change (typed, pasted, Draft injected, voice transcript).
@@ -72,6 +64,19 @@ export function Room() {
     const interval = setInterval(() => setNow(Date.now()), 10_000);
     return () => clearInterval(interval);
   }, []);
+
+  const touchPresence = useCallback((force = false) => {
+    if (!self?.token) return;
+    const at = Date.now();
+    if (!force && at - lastPresenceAtRef.current < 15_000) return;
+    lastPresenceAtRef.current = at;
+    void touchHostedHumanPresence(code, self.token).then(refreshRoom).catch(() => undefined);
+  }, [code, self?.token, refreshRoom]);
+  useEffect(() => {
+    touchPresence();
+    const interval = window.setInterval(touchPresence, 60_000);
+    return () => window.clearInterval(interval);
+  }, [touchPresence]);
 
   // --- Share ---
   const joinUrl = `${window.location.origin}/j/${code}`;
@@ -161,7 +166,7 @@ export function Room() {
     }
     if (sawSelfRef.current) {
       // We were here, now we're not — host kicked us.
-      sessionStorage.removeItem(`room:${code}:self`);
+      clearHumanSeat(code);
       (async () => {
         const { showToast } = await import('../components/Toast.js');
         showToast('You were removed from the meeting by the host');
@@ -280,6 +285,13 @@ export function Room() {
       // ignore — room may already be ended
       setEnded(true);
     }
+  }
+
+  async function handleLeaveRoom() {
+    if (!self) return;
+    try { await leaveHostedHumanRoom(code, self.token); } catch { /* local exit still wins */ }
+    clearHumanSeat(code);
+    navigate(`/j/${code}`, { replace: true });
   }
 
   const [mobilePanel, setMobilePanel] = useState<'chat' | 'people' | 'outputs'>('chat');
@@ -534,6 +546,7 @@ export function Room() {
     setAttachments([]);
     try {
       await sendMessage(msg);
+      touchPresence(true);
     } catch (e) {
       const { showToast } = await import('../components/Toast.js');
       showToast(e instanceof Error ? `Send failed: ${e.message}` : 'Send failed');
@@ -677,6 +690,12 @@ export function Room() {
               className="text-[10px] font-semibold text-accent bg-accent-tint px-2 py-1 rounded hover:bg-accent/20"
             >
               Share
+            </button>
+            <button
+              onClick={() => { void handleLeaveRoom(); }}
+              className="text-[10px] font-semibold text-ink-soft bg-surface-softer px-2 py-1 rounded hover:text-red-600"
+            >
+              Leave
             </button>
             <MeetingCodePill code={code} />
           </div>
@@ -1089,7 +1108,7 @@ export function Room() {
                   <textarea
                     ref={textareaRef}
                     value={text}
-                    onChange={e => setText(e.target.value)}
+                    onChange={e => { setText(e.target.value); touchPresence(); }}
                     onPaste={e => { void handlePaste(e); }}
                     onKeyDown={e => {
                       // Enter sends; Shift+Enter / IME composition lets newlines through.
