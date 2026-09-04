@@ -39,6 +39,31 @@ const ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT = [
   'return 1',
 ].join('\n');
 
+const ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT = [
+  "local raw = redis.call('GET', KEYS[1])",
+  'if not raw then return 0 end',
+  'local current = cjson.decode(raw)',
+  'if tonumber(current.version) ~= tonumber(ARGV[1]) then return 0 end',
+  "if redis.call('SISMEMBER', KEYS[3], ARGV[3]) == 1 then return 0 end",
+  "if ARGV[5] ~= '' and redis.call('SISMEMBER', KEYS[3], ARGV[5]) ~= 1 then return 0 end",
+  'local legacy_row = nil',
+  "if ARGV[5] ~= '' then",
+  "  local rows = redis.call('LRANGE', KEYS[2], 0, -1)",
+  '  for _, row in ipairs(rows) do',
+  '    local decoded = cjson.decode(row)',
+  '    if decoded.id == ARGV[5] then legacy_row = row break end',
+  '  end',
+  '  if not legacy_row then return 0 end',
+  'end',
+  "redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')",
+  "if legacy_row then redis.call('LREM', KEYS[2], 1, legacy_row) redis.call('SREM', KEYS[3], ARGV[5]) end",
+  "redis.call('SADD', KEYS[3], ARGV[3])",
+  "redis.call('RPUSH', KEYS[2], ARGV[4])",
+  "redis.call('EXPIREAT', KEYS[3], tonumber(ARGV[6]))",
+  "redis.call('EXPIREAT', KEYS[2], tonumber(ARGV[6]))",
+  'return 1',
+].join('\n');
+
 const BOARD_CAS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   "if ARGV[1] == 'absent' then",
@@ -153,6 +178,18 @@ export class RedisRoomPersistence implements RoomPersistence {
     const result = await this.client.command<number>([
       'EVAL', ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT, '3', roomKey(code), receiptsKey(code), receiptIdsKey(code),
       String(expectedVersion), JSON.stringify(next), receiptId,
+    ]);
+    return Number(result) === 1;
+  }
+
+  async compareAndSwapRoomAndReplaceReceipt(
+    code: string, expectedVersion: number, next: Room, receipt: RoomReceipt, deleteReceiptId?: string,
+  ): Promise<boolean> {
+    const expiresAt = Math.floor(next.createdAt / 1000) + ROOM_TTL_SECONDS;
+    const result = await this.client.command<number>([
+      'EVAL', ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT, '3', roomKey(code), receiptsKey(code), receiptIdsKey(code),
+      String(expectedVersion), JSON.stringify(next), receipt.id, canonicalJson(receipt), deleteReceiptId ?? '',
+      String(expiresAt),
     ]);
     return Number(result) === 1;
   }

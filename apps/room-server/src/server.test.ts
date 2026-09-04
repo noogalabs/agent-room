@@ -1,4 +1,4 @@
-import { createHmac, generateKeyPairSync } from 'node:crypto';
+import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Server as HttpServer } from 'node:http';
 import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -31,6 +31,7 @@ function room(): Room {
 function memoryRecords(initial = room()) {
   let current = structuredClone(initial);
   let refuseAtomicRemoval = false;
+  let refuseAtomicJoin = false;
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
     createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
@@ -43,6 +44,15 @@ function memoryRecords(initial = room()) {
       receipts.splice(index, 1);
       return true;
     }),
+    updateRoomAndReplaceReceipt: vi.fn(async (_code: string, version: number, next: Room, receipt: typeof receipts[number], deleteId?: string) => {
+      if (refuseAtomicJoin || version !== current.version || receipts.some(item => item.id === receipt.id)) return false;
+      const deleteIndex = deleteId ? receipts.findIndex(item => item.id === deleteId) : -1;
+      if (deleteId && deleteIndex < 0) return false;
+      current = structuredClone(next);
+      if (deleteIndex >= 0) receipts.splice(deleteIndex, 1);
+      receipts.push(structuredClone(receipt));
+      return true;
+    }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
     deleteReceipt: vi.fn(async (_code: string, id: string) => {
@@ -53,7 +63,9 @@ function memoryRecords(initial = room()) {
     }),
     listReceipts: vi.fn(async () => structuredClone(receipts)),
   } as unknown as RoomRecordServer;
-  return { records, current: () => current, receipts: () => structuredClone(receipts), refuseAtomicRemoval: () => { refuseAtomicRemoval = true; } };
+  return { records, current: () => current, receipts: () => structuredClone(receipts),
+    refuseAtomicRemoval: () => { refuseAtomicRemoval = true; },
+    refuseAtomicJoin: () => { refuseAtomicJoin = true; } };
 }
 
 function hostedEnv(path: string, extra: Record<string, string | undefined> = {}) {
@@ -187,20 +199,20 @@ describe('hosted room production entry', () => {
       expect(response.status).toBe(400);
       expect(await response.json()).toStrictEqual({ error: 'agent_card_signature_invalid' });
     }
-    expect((memory.records.updateRoom as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect((memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
 
     let response = await post('ROOM1', signAgentCard(card, 'key-a', trust.privateKey), 'Different Agent');
     expect(await response.json()).toStrictEqual({ error: 'agent_card_identity_mismatch' });
     response = await post('MISSING', signAgentCard(card, 'key-a', trust.privateKey));
     expect(response.status).toBe(404); expect(await response.json()).toStrictEqual({ error: 'room_not_found' });
 
-    (memory.records.updateRoom as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    (memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     response = await post('ROOM1', signAgentCard(card, 'key-a', trust.privateKey));
     expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
 
     response = await post('ROOM1', signAgentCard(card, 'key-a', trust.privateKey));
     expect(response.status).toBe(200);
-    expect(memory.records.updateRoom).toHaveBeenCalledTimes(2);
+    expect(memory.records.updateRoomAndReplaceReceipt).toHaveBeenCalledTimes(2);
   });
 
   it('returns a generic error for unexpected runtime failures', async () => {
@@ -499,21 +511,64 @@ describe('hosted room production entry', () => {
     expect(memory.receipts().map(item => item.id)).toContain(receiptId);
   });
 
-  it('replaces old-scheme roster receipts with versioned per-agent receipts on the first authenticated join', async () => {
+  it('migrates only the verified cards exact legacy roster row and receipt on join', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
-    await memory.records.appendReceipt({ id: `member-roster:${'a'.repeat(64)}`, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1, payload: { memberName: 'Legacy Agent', memberClient: 'cc' } });
-    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
-    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
     const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
     const participant = { name: 'Agent A', role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
+    const publicDer = trust.publicKey.export({ type: 'spki', format: 'der' });
+    const legacyFingerprint = createHash('sha256').update(card.fleetId).update('\0').update(publicDer).digest('hex');
+    const legacyReceiptId = `member-roster:${legacyFingerprint}`;
+    const unrelatedReceiptId = 'human-invite:keep-this-revocation:revoked';
+    const legacyIdentity = { cardFingerprint: legacyFingerprint, fleetId: card.fleetId, cardName: card.name,
+      scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: 1 };
+    const legacyRow = { ...participant, joinedAt: 1, lastSeenAt: 1, authenticatedIdentity: legacyIdentity };
+    const memoryWithLegacy = memoryRecords({ ...room(), participants: [legacyRow] });
+    await memoryWithLegacy.records.appendReceipt({ id: legacyReceiptId, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1, payload: { memberName: card.name, memberClient: 'cc' } });
+    await memoryWithLegacy.records.appendReceipt({ id: unrelatedReceiptId, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1, payload: { inviteId: 'keep-this-revocation' } });
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memoryWithLegacy.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
     expect((await fetch(`${base}/api/rooms/ROOM1/join`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
     })).status).toBe(200);
-    const roster = memory.receipts().filter(item => item.id.startsWith('member-roster:'));
+    const roster = memoryWithLegacy.receipts().filter(item => item.id.startsWith('member-roster:'));
     expect(roster).toHaveLength(1);
-    expect(roster[0]?.id).not.toBe(`member-roster:${'a'.repeat(64)}`);
+    expect(roster[0]?.id).not.toBe(legacyReceiptId);
     expect(roster[0]?.payload.fingerprintVersion).toBe(2);
+    expect(memoryWithLegacy.current().participants).toHaveLength(1);
+    expect(memoryWithLegacy.current().participants[0]?.authenticatedIdentity?.cardFingerprint)
+      .not.toBe(legacyFingerprint);
+    expect(memoryWithLegacy.receipts().map(item => item.id)).toContain(unrelatedReceiptId);
+  });
+
+  it('refuses an atomic agent join failure without changing the participant or receipt state', async () => {
+    const trust = await trustFile();
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: card.name, role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
+    const publicDer = trust.publicKey.export({ type: 'spki', format: 'der' });
+    const legacyFingerprint = createHash('sha256').update(card.fleetId).update('\0').update(publicDer).digest('hex');
+    const legacyReceiptId = `member-roster:${legacyFingerprint}`;
+    const legacyRow = { ...participant, joinedAt: 1, lastSeenAt: 1, authenticatedIdentity: {
+      cardFingerprint: legacyFingerprint, fleetId: card.fleetId, cardName: card.name,
+      scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: 1,
+    } };
+    const memory = memoryRecords({ ...room(), participants: [legacyRow] });
+    await memory.records.appendReceipt({ id: legacyReceiptId, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1,
+      payload: { memberName: card.name, memberClient: 'cc' } });
+    await memory.records.appendReceipt({ id: 'human-invite:still-revoked:revoked', roomCode: 'ROOM1', kind: 'receipt', createdAt: 1,
+      payload: { inviteId: 'still-revoked' } });
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    memory.refuseAtomicJoin();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const response = await fetch(`${base}/api/rooms/ROOM1/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
   });
 
   it('refuses expired and tampered human sessions by name', async () => {
@@ -649,4 +704,36 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name).sort()).toEqual(['Agent Alpha', 'Agent Beta']);
     expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(2);
   });
+
+  it('converges simultaneous first joins of one signed identity on one Postgres seat with two fresh tokens', async () => {
+    const trust = await trustFile(); const code = `PC${Date.now()}`;
+    const hosted = await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl }));
+    opened.push(hosted); await new Promise<void>(resolve => hosted.server.listen(0, '127.0.0.1', resolve));
+    const address = hosted.server.address(); if (!address || typeof address === 'string') throw new Error('listen');
+    const base = `http://127.0.0.1:${address.port}`;
+    expect((await fetch(`${base}/api/rooms`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ ...room(), code }) })).status).toBe(201);
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent Concurrent', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: card.name, role: '', color: '#000000', initials: 'AC', client: 'cc' as const };
+    const atomicJoin = hosted.rooms.persistence.compareAndSwapRoomAndReplaceReceipt.bind(hosted.rooms.persistence);
+    let arrivals = 0; let release!: () => void;
+    const bothReady = new Promise<void>(resolve => { release = resolve; });
+    vi.spyOn(hosted.rooms.persistence, 'compareAndSwapRoomAndReplaceReceipt').mockImplementation(async (...args) => {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await bothReady;
+      return atomicJoin(...args);
+    });
+    const request = () => fetch(`${base}/api/rooms/${code}/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+    });
+    const responses = await Promise.all([request(), request()]);
+    expect(responses.map(response => response.status)).toEqual([200, 200]);
+    const joined = await Promise.all(responses.map(response => response.json() as Promise<{ participantToken: string; authenticatedIdentity: { cardFingerprint: string } }>));
+    expect(joined[0]!.participantToken).not.toBe(joined[1]!.participantToken);
+    expect(joined[0]!.authenticatedIdentity.cardFingerprint).toBe(joined[1]!.authenticatedIdentity.cardFingerprint);
+    expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name)).toEqual(['Agent Concurrent']);
+    expect((await hosted.rooms.listReceipts(code)).filter(item => item.id.startsWith('member-roster:'))).toHaveLength(1);
+  });
+
 });

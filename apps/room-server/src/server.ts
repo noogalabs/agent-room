@@ -99,27 +99,6 @@ export async function createHostedRoomServer(
     if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
     return { ...issued, participant };
   };
-  const appendMemberRosterReceipt = async (code: string, participant: import('@agent-room/shared').Participant) => {
-    const identity = participant.authenticatedIdentity;
-    if (!identity) throw new HumanSessionError('agent_identity_required');
-    // Fingerprint v1 identified an entire fleet key, so its roster receipts can
-    // never be derived by the per-agent v2 identity. Clean those receipts lazily
-    // on the first authenticated join in each pre-existing room. Each deletion
-    // still targets the exact stored id; invite and session receipts are outside
-    // this namespace and cannot be selected.
-    const legacyRoster = (await rooms.listReceipts(code)).filter(receipt =>
-      receipt.id.startsWith('member-roster:') && receipt.payload.fingerprintVersion !== 2);
-    for (const receipt of legacyRoster) {
-      if (!await rooms.deleteReceipt(code, receipt.id)) throw new HumanSessionError('room_version_conflict');
-    }
-    await rooms.appendReceipt({
-      id: `member-roster:${identity.cardFingerprint}`,
-      roomCode: code,
-      kind: 'receipt',
-      createdAt: participant.joinedAt,
-      payload: { memberName: participant.name, memberClient: participant.client, fingerprintVersion: 2 },
-    });
-  };
   const server = createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? '/', 'http://room.invalid');
@@ -145,7 +124,6 @@ export async function createHostedRoomServer(
         }
         if (input.action === 'join') {
           const participant = await joins.join(code, input as never);
-          await appendMemberRosterReceipt(code, participant);
           return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
         }
         const token = bearer(req) ?? '';
@@ -279,7 +257,6 @@ export async function createHostedRoomServer(
       }
       if (req.method === 'POST' && action === 'join') {
         const participant = await joins.join(code, await body(req) as never);
-        await appendMemberRosterReceipt(code, participant);
         return reply(res, 200, { ...participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity!).token });
       }
       if (req.method === 'POST' && action === 'messages') {

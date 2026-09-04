@@ -36,6 +36,11 @@ export class RoomRecordServer {
   updateRoomAndDeleteReceipt(code: string, expectedVersion: number, next: Room, receiptId: string): Promise<boolean> {
     return this.persistence.compareAndSwapRoomAndDeleteReceipt(code, expectedVersion, next, receiptId);
   }
+  updateRoomAndReplaceReceipt(
+    code: string, expectedVersion: number, next: Room, receipt: RoomReceipt, deleteReceiptId?: string,
+  ): Promise<boolean> {
+    return this.persistence.compareAndSwapRoomAndReplaceReceipt(code, expectedVersion, next, receipt, deleteReceiptId);
+  }
   appendMessage(code: string, message: Message): Promise<number> {
     return this.persistence.appendMessage(code, message);
   }
