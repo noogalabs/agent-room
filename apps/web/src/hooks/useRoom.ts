@@ -1,21 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Message, Room } from '@agent-room/shared';
 import {
-  HEARTBEAT_MS,
   MESSAGE_POLL_MS,
   MESSAGE_POLL_HIDDEN_MS,
   ROOM_POLL_MS,
   ROOM_POLL_HIDDEN_MS,
 } from '@agent-room/shared';
-import {
-  createClient,
-  getRoom,
-  listMessages,
-  appendMessage,
-  updatePresence,
-  getMessageTotalCount,
-} from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+import { appendHostedMessage, getHostedRoom, listHostedMessages } from '../room-server-client.js';
 
 interface UseRoomState {
   room: Room | null;
@@ -23,10 +14,9 @@ interface UseRoomState {
   error: string | null;
 }
 
-export function useRoom(code: string, selfName: string) {
+export function useRoom(code: string, selfName: string, sessionToken = '') {
   const [state, setState] = useState<UseRoomState>({ room: null, messages: [], error: null });
   const cursor = useRef(0);
-  const clientRef = useRef(createClient(ENV.upstash));
 
   // In-flight guard with TIMEOUT escape hatch. Two failure modes we hit:
   //
@@ -56,7 +46,7 @@ export function useRoom(code: string, selfName: string) {
     const startedAt = Date.now();
     console.debug(traceTag, 'pullMessages.fire', { cursor: cursor.current, t: startedAt });
     try {
-      const fresh = await listMessages(clientRef.current, code, cursor.current);
+      const fresh = await listHostedMessages(code, cursor.current, sessionToken);
       console.debug(traceTag, 'pullMessages.fetched', {
         fresh: fresh.length,
         ms: Date.now() - startedAt,
@@ -69,18 +59,6 @@ export function useRoom(code: string, selfName: string) {
         // the server's absolute counter (network race / earlier bug /
         // clock skew), every future poll returns [] forever. Detect
         // and reset.
-        const total = await getMessageTotalCount(clientRef.current, code);
-        if (total !== null && cursor.current > total) {
-          cursor.current = 0;
-          const recover = await listMessages(clientRef.current, code, 0);
-          cursor.current = total;
-          setState(s => {
-            const seen = new Set(s.messages.map(m => m.id));
-            const deduped = recover.filter(m => !seen.has(m.id));
-            if (deduped.length === 0) return s;
-            return { ...s, messages: [...s.messages, ...deduped] };
-          });
-        }
         return;
       }
       // CRITICAL: anchor cursor to the server's absolute counter, never
@@ -95,8 +73,7 @@ export function useRoom(code: string, selfName: string) {
       // Setting cursor.current = total enforces "we've now seen exactly
       // what the server has" regardless of how the local arithmetic went.
       // Two concurrent polls will both write the same value → no drift.
-      const total = await getMessageTotalCount(clientRef.current, code);
-      cursor.current = total ?? (cursor.current + fresh.length);
+      cursor.current += fresh.length;
       setState(s => {
         const seen = new Set(s.messages.map(m => m.id));
         const deduped = fresh.filter(m => !seen.has(m.id));
@@ -105,7 +82,7 @@ export function useRoom(code: string, selfName: string) {
           existingCount: s.messages.length,
           dedupedCount: deduped.length,
           newCursor: cursor.current,
-          serverTotal: total,
+          serverTotal: cursor.current,
         });
         if (deduped.length === 0) return s;
         return { ...s, messages: [...s.messages, ...deduped] };
@@ -116,16 +93,16 @@ export function useRoom(code: string, selfName: string) {
     } finally {
       inFlightRef.current = null;
     }
-  }, [code]);
+  }, [code, sessionToken]);
 
   const pullRoom = useCallback(async () => {
     try {
-      const r = await getRoom(clientRef.current, code);
+      const r = await getHostedRoom(code, sessionToken);
       setState(s => ({ ...s, room: r }));
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }
-  }, [code]);
+  }, [code, sessionToken]);
 
   // Reset polling state to a clean slate and refetch from cursor 0. Used by
   // the visibilitychange handler (so a backgrounded tab returning gets a
@@ -143,18 +120,17 @@ export function useRoom(code: string, selfName: string) {
   const forceRefresh = useCallback(async () => {
     cursor.current = 0;
     try {
-      const [r, fresh, total] = await Promise.all([
-        getRoom(clientRef.current, code),
-        listMessages(clientRef.current, code, 0),
-        getMessageTotalCount(clientRef.current, code),
+      const [r, fresh] = await Promise.all([
+        getHostedRoom(code, sessionToken),
+        listHostedMessages(code, 0, sessionToken),
       ]);
       // Match server-side logical cursor (counter) so polling stays correct after LTRIM; legacy rooms fall back.
-      cursor.current = total ?? fresh.length;
+      cursor.current = fresh.length;
       setState({ room: r, messages: fresh, error: null });
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }
-  }, [code]);
+  }, [code, sessionToken]);
 
   useEffect(() => {
     cursor.current = 0;
@@ -162,12 +138,10 @@ export function useRoom(code: string, selfName: string) {
 
     let msgTimer: ReturnType<typeof setInterval> | null = null;
     let roomTimer: ReturnType<typeof setInterval> | null = null;
-    let hbTimer: ReturnType<typeof setInterval> | null = null;
 
     const stop = () => {
       if (msgTimer) { clearInterval(msgTimer); msgTimer = null; }
       if (roomTimer) { clearInterval(roomTimer); roomTimer = null; }
-      if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
     };
 
     const start = (slow: boolean) => {
@@ -178,9 +152,6 @@ export function useRoom(code: string, selfName: string) {
       const roomMs = slow ? ROOM_POLL_HIDDEN_MS : ROOM_POLL_MS;
       msgTimer = setInterval(pullMessages, msgMs);
       roomTimer = setInterval(pullRoom, roomMs);
-      hbTimer = setInterval(() => {
-        updatePresence(clientRef.current, code, selfName, Date.now()).catch(() => {});
-      }, HEARTBEAT_MS);
     };
 
     // When the tab is hidden (common: founder works in Cursor while the room
@@ -239,7 +210,7 @@ export function useRoom(code: string, selfName: string) {
     });
 
     try {
-      await appendMessage(clientRef.current, code, msg);
+      await appendHostedMessage(code, sessionToken, msg);
       await pullMessages();
     } catch (e) {
       // Roll back the optimistic add — server didn't accept the message.
@@ -252,7 +223,7 @@ export function useRoom(code: string, selfName: string) {
       }));
       throw e;
     }
-  }, [code, pullMessages]);
+  }, [code, sessionToken, pullMessages]);
 
   return { ...state, sendMessage, refreshRoom: pullRoom, forceRefresh };
 }

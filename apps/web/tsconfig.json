@@ -6,8 +6,7 @@
     "types": ["vite/client"],
     "noEmit": true,
     "paths": {
-      "@agent-room/shared": ["../../packages/shared/src/index.ts"],
-      "@agent-room/upstash-client": ["../../packages/upstash-client/src/index.ts"]
+      "@agent-room/shared": ["../../packages/shared/src/index.ts"]
     }
   },
   "include": ["src"]

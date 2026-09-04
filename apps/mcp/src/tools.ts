@@ -957,14 +957,6 @@ export function registerTools(server: Server) {
     }
 
     if (name === 'room_create') {
-      // The room code is generated server-side by /api/room.
-      const created = await createRoom(client, {
-        topic: a.topic,
-        createdBy: a.name,
-        projectId: typeof a.projectId === 'string' ? a.projectId : undefined,
-        projectKey: typeof a.projectKey === 'string' ? a.projectKey : undefined,
-      });
-      const code = created.code;
       const participant: Participant = {
         name: a.name,
         role: a.role ?? '',
@@ -974,6 +966,15 @@ export function registerTools(server: Server) {
         joinedAt: Date.now(),
         lastSeenAt: Date.now(),
       };
+      // The room code is generated server-side by /api/room.
+      const created = await createRoom(client, {
+        topic: a.topic,
+        createdBy: a.name,
+        participant,
+        projectId: typeof a.projectId === 'string' ? a.projectId : undefined,
+        projectKey: typeof a.projectKey === 'string' ? a.projectKey : undefined,
+      });
+      const code = created.code;
       const joined = await joinRoom(client, code, participant, {
         hostKey: created.hostKey,
         priorIdentity: { name: a.name, client: 'cc' },
@@ -1057,16 +1058,10 @@ export function registerTools(server: Server) {
         accessToken: typeof a.accessToken === 'string' ? a.accessToken : storedStateRoom?.accessToken,
         participantToken: storedStateRoom?.participantToken,
       });
-      const targetRoom = await getRoom(client, a.code);
       const priorIdentity = storedStateRoom
         ? { name: storedStateRoom.name, client: 'cc' as const }
         : undefined;
-      const reconnecting = Boolean(
-        priorIdentity &&
-        targetRoom.participants.some((p: Participant) =>
-          p.name === priorIdentity.name && p.client === priorIdentity.client
-        )
-      );
+      const reconnecting = Boolean(priorIdentity);
       let updated: Awaited<ReturnType<typeof joinRoom>>;
       try {
         updated = await joinRoom(client, a.code, participant, {

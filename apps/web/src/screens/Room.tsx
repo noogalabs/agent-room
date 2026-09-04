@@ -8,15 +8,14 @@ import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 import { colorForName, initialsFor } from '../lib/colors.js';
 import { PRESENCE_STALE_MS, PRESENCE_DISCONNECTED_MS, artifactLabel, extractArtifacts, type ArtifactKind, type Message, type MessageAttachment, type Participant, type ReplyMode, type ReplyModeConfig, type RoomArtifact, type SystemEventType } from '@agent-room/shared';
-import { appendSystemMessage, directInvoke, getTurnState, hostSkipCurrent, setMuted, setReplyMode, createClient, createRoomReport, endRoom as endRoomApi, reactivateRoom as reactivateRoomApi, removeParticipant, type TurnState } from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+import { appendHostedSystemMessage, createHostedReport, directHostedInvoke, endHostedRoom, getHostedTurnState, reactivateHostedRoom, removeHostedParticipant, setHostedMuted, setHostedReplyMode, skipHostedCurrent, type HostedTurnState } from '../room-server-client.js';
 import { copyText } from '../lib/copy.js';
 import { templateById } from '../lib/templates.js';
 import { ALLOWED_ATTACHMENT_TYPES, MAX_ATTACHMENTS_PER_MESSAGE, deleteRoomBlobs, formatBytes, uploadAttachment } from '../lib/upload.js';
 
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000; // 1 hour — long enough that humans + agents discussing intermittently don't trip it
 const AUTO_CLOSE_COUNTDOWN = 5;          // seconds
-interface SelfIdentity { name: string; role: string }
+interface SelfIdentity { name: string; role: string; token: string }
 
 function readStoredSelf(code: string): SelfIdentity | null {
   const stored = sessionStorage.getItem(`room:${code}:self`);
@@ -44,13 +43,13 @@ export function Room() {
   useEffect(() => {
     if (!self) navigate(`/j/${code}`, { replace: true });
   }, [self, code, navigate]);
-  const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '');
+  const { room, messages, error, sendMessage, refreshRoom, forceRefresh } = useRoom(code, self?.name ?? '', self?.token ?? '');
   const [text, setText] = useState('');
   const [attachments, setAttachments] = useState<MessageAttachment[]>([]);
   const [attachBusy, setAttachBusy] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [modeBusy, setModeBusy] = useState(false);
-  const [turnState, setTurnState] = useState<TurnState | null>(null);
+  const [turnState, setTurnState] = useState<HostedTurnState | null>(null);
   const [now, setNow] = useState(Date.now());
   const feedRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -100,8 +99,7 @@ export function Room() {
     let cancelled = false;
     async function pullTurnState() {
       try {
-        const client = createClient(ENV.upstash);
-        const next = await getTurnState(client, code);
+        const next = await getHostedTurnState(code, self?.token ?? '');
         if (!cancelled) setTurnState(next);
       } catch {
         if (!cancelled) setTurnState(null);
@@ -243,8 +241,7 @@ export function Room() {
     if (!room || !self || room.createdBy !== self.name) return;
     const wantMuted = p.canSpeak !== false; // currently can speak → going to mute
     try {
-      const client = createClient(ENV.upstash);
-      await setMuted(client, code, self.name, p.name, p.client, wantMuted);
+      await setHostedMuted(code, self.token, p.name, p.client, wantMuted);
       await refreshRoom();
     } catch (e) {
       const { showToast } = await import('../components/Toast.js');
@@ -260,8 +257,7 @@ export function Room() {
     if (p.name === self.name && p.client === 'web') return; // host can't kick themselves
     if (!confirm(`Remove ${p.name} (${p.client}) from the room?`)) return;
     try {
-      const client = createClient(ENV.upstash);
-      await removeParticipant(client, code, self.name, p.name, p.client);
+      await removeHostedParticipant(code, self.token, p.name, p.client);
       await refreshRoom();
     } catch (e) {
       const { showToast } = await import('../components/Toast.js');
@@ -271,8 +267,8 @@ export function Room() {
 
   async function handleEndMeeting() {
     try {
-      const client = createClient(ENV.upstash);
-      await endRoomApi(client, code);
+      if (!self) throw new Error('host_session_required');
+      await endHostedRoom(code, self.token);
       setEnded(true);
       setShowIdlePrompt(false);
       if (countdownRef.current) { clearInterval(countdownRef.current); countdownRef.current = null; }
@@ -294,8 +290,8 @@ export function Room() {
     if (!room) return;
     setReportBusy(true);
     try {
-      const client = createClient(ENV.upstash);
-      await createRoomReport(client, room, messages);
+      if (!self) throw new Error('host_session_required');
+      await createHostedReport(code, self.token);
       // A1: copy the permanent share link to clipboard alongside navigating.
       // The report key is stored without TTL (see packages/upstash-client/src/reports.ts),
       // so the link survives past the 24h room TTL — that's exactly the "Save"
@@ -397,8 +393,7 @@ export function Room() {
     }
     setModeBusy(true);
     try {
-      const client = createClient(ENV.upstash);
-      await setReplyMode(client, code, me.name, mode, nextConfig);
+      await setHostedReplyMode(code, me.token, mode, nextConfig);
       await refreshRoom();
       const { showToast } = await import('../components/Toast.js');
       showToast(`Reply mode set to ${modeLabel(mode)}.`);
@@ -412,8 +407,7 @@ export function Room() {
 
   async function refreshTurnAndMessages() {
     try {
-      const client = createClient(ENV.upstash);
-      setTurnState(await getTurnState(client, code));
+      setTurnState(await getHostedTurnState(code, self?.token ?? ''));
     } catch {
       setTurnState(null);
     }
@@ -426,7 +420,6 @@ export function Room() {
     target: { name: string; client: 'web' | 'cc' },
     extra: Partial<NonNullable<Message['metadata']>> = {},
   ) {
-    const client = createClient(ENV.upstash);
     const nowMs = Date.now();
     const msg: Message = {
       id: nowMs,
@@ -446,7 +439,8 @@ export function Room() {
         ...extra,
       },
     };
-    await appendSystemMessage(client, code, msg);
+    if (!self) throw new Error('host_session_required');
+    await appendHostedSystemMessage(code, self.token, msg);
   }
 
   async function handleAskAgent(p: Participant) {
@@ -462,8 +456,7 @@ export function Room() {
     }
     setModeBusy(true);
     try {
-      const client = createClient(ENV.upstash);
-      const added = await directInvoke(client, code, { name: p.name, client: p.client }, 'host');
+      const added = await directHostedInvoke(code, me.token, { name: p.name, client: p.client });
       if (!added) {
         const { showToast } = await import('../components/Toast.js');
         showToast(`${p.name} is already queued for a direct reply.`);
@@ -488,8 +481,7 @@ export function Room() {
     if (!canConfigureReplyMode || !currentSpeaker) return;
     setModeBusy(true);
     try {
-      const client = createClient(ENV.upstash);
-      const skipped = await hostSkipCurrent(client, code, activeRoom);
+      const skipped = await skipHostedCurrent(code, me.token);
       if (!skipped) {
         const { showToast } = await import('../components/Toast.js');
         showToast('No active agent to skip.');
@@ -995,8 +987,7 @@ export function Room() {
                   <button
                     onClick={async () => {
                       try {
-                        const client = createClient(ENV.upstash);
-                        await reactivateRoomApi(client, code);
+                        await reactivateHostedRoom(code, self.token);
                         // Reset the full idle pipeline. Without these the idle timer
                         // would immediately re-fire (lastMsgTimeRef is still hours
                         // old, showIdlePrompt may still be true) and the room would

@@ -1,8 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { artifactLabel, extractArtifacts, normalizeEscapedWhitespace, type ArtifactKind, type Message, type RoomArtifact, type RoomReport } from '@agent-room/shared';
-import { createClient, createRoomReport, getRoom, getRoomReport, listMessages } from '@agent-room/upstash-client';
-import { ENV } from '../env.js';
+import { createHostedReport, getHostedReport } from '../room-server-client.js';
 
 export function Report() {
   const { code = '' } = useParams();
@@ -12,8 +11,10 @@ export function Report() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    const client = createClient(ENV.upstash);
-    getRoomReport(client, code)
+    const stored = sessionStorage.getItem(`room:${code}:self`);
+    const sessionToken = stored ? (JSON.parse(stored) as { token?: string }).token : undefined;
+    const watchToken = new URLSearchParams(window.location.search).get('view') ?? undefined;
+    getHostedReport(code, sessionToken ?? watchToken ?? '')
       .then(found => {
         setReport(found);
         setMissing(!found);
@@ -25,10 +26,10 @@ export function Report() {
     setRefreshing(true);
     setError(null);
     try {
-      const client = createClient(ENV.upstash);
-      const room = await getRoom(client, code);
-      const messages = await listMessages(client, code, 0);
-      const next = await createRoomReport(client, room, messages);
+      const stored = sessionStorage.getItem(`room:${code}:self`);
+      const token = stored ? (JSON.parse(stored) as { token?: string }).token : undefined;
+      if (!token) throw new Error('host_session_required');
+      const next = await createHostedReport(code, token);
       setReport(next);
       setMissing(false);
     } catch (e) {
