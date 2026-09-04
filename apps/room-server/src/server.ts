@@ -72,11 +72,19 @@ export async function createHostedRoomServer(
     const member = room?.participants.find(item => item.client === 'web' && item.name === session.name);
     if (!room || session.name !== room.createdBy || !member?.authenticatedIdentity) throw new HumanSessionError('host_auth_required');
   };
+  const readCapability = (req: IncomingMessage, url: URL): string => bearer(req) ?? url.searchParams.get('access') ?? '';
+  const authorizeRead = async (req: IncomingMessage, url: URL, code: string): Promise<void> => {
+    const token = readCapability(req, url);
+    if (token.length === hostToken.length && timingSafeEqual(Buffer.from(token), Buffer.from(hostToken))) return;
+    await humans.verifyReadCapability(token, code);
+  };
   const addHuman = async (code: string, input: { inviteToken: string; name: string; role?: string; color?: string; initials?: string }) => {
-    const issued = await humans.exchangeInvite(code, input.inviteToken, input.name, input.role ?? '');
     const room = await rooms.getRoom(code);
     if (!room || room.status !== 'active') throw new HumanSessionError('room_not_found');
-    if (room.participants.some(item => item.name === issued.identity.cardName)) throw new HumanSessionError('human_name_taken');
+    const cleanName = input.name.trim();
+    const roster = await rooms.listReceipts(code);
+    if (room.participants.some(item => item.name === cleanName) || roster.some(item => item.payload.memberName === cleanName)) throw new HumanSessionError('human_name_taken');
+    const issued = await humans.exchangeInvite(code, input.inviteToken, cleanName, input.role ?? '');
     const participant = { name: issued.identity.cardName, role: 'human', color: input.color ?? '#555555', initials: input.initials ?? 'HU', client: 'web' as const, joinedAt: issued.identity.verifiedAt, lastSeenAt: issued.identity.verifiedAt, authenticatedIdentity: issued.identity };
     const next = { ...room, version: room.version + 1, participants: [...room.participants, participant] };
     if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
@@ -90,6 +98,39 @@ export async function createHostedRoomServer(
       }
       if (req.method === 'GET' && !url.pathname.startsWith('/api/')) {
         return await serveWeb(res, env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist', url.pathname);
+      }
+      if (req.method === 'POST' && url.pathname === '/api/room') {
+        const input = await body(req) as Record<string, any>;
+        const code = String(input.code ?? '');
+        if (input.action === 'join') {
+          const participant = await joins.join(code, input as never);
+          if (!participant.authenticatedIdentity) throw new HumanSessionError('agent_identity_required');
+          await rooms.appendReceipt({ id: `member-roster:${participant.authenticatedIdentity.cardFingerprint}`, roomCode: code, kind: 'receipt', createdAt: Date.now(), payload: { memberName: participant.name, memberClient: participant.client } });
+          return reply(res, 200, { room: await rooms.getRoom(code), participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity).token });
+        }
+        const token = bearer(req) ?? '';
+        if (input.action === 'get' || input.action === 'messages' || input.action === 'taskBoard' || input.action === 'sweep') {
+          await humans.verifyReadCapability(token, code);
+          if (input.action === 'get' || input.action === 'sweep') return reply(res, 200, { room: await rooms.getRoom(code) });
+          if (input.action === 'messages') return reply(res, 200, { messages: await rooms.listMessages(code, Number(input.cursor ?? 0)) });
+          return reply(res, 200, { board: await rooms.getTaskBoard(code) });
+        }
+        if (input.action === 'send' || input.action === 'presence') {
+          const session = await humans.verifyMemberSession(token, code);
+          const room = await rooms.getRoom(code); const member = room?.participants.find(item => item.name === session.name && item.client === session.client);
+          if (!room || !member?.authenticatedIdentity) throw new HumanSessionError('member_session_required');
+          if (input.action === 'presence') {
+            const next = { ...room, version: room.version + 1, participants: room.participants.map(item => item === member ? { ...item, lastSeenAt: Date.now(), listenUntil: Number(input.until) } : item) };
+            if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
+            return reply(res, 200, {});
+          }
+          const supplied = input.message as Message;
+          if (supplied.name !== member.name || supplied.client !== member.client || supplied.type !== 'msg') throw new HumanSessionError('member_identity_mismatch');
+          const message: Message = { id: supplied.id, type: 'msg', name: member.name, role: member.role, initials: member.initials, color: member.color, client: member.client, text: supplied.text, time: supplied.time, attachments: supplied.attachments };
+          const sequence = await rooms.appendMessage(code, message);
+          return reply(res, 200, { result: { cursor: sequence, message } });
+        }
+        throw new HumanSessionError('room_action_invalid');
       }
       if (req.method === 'POST' && url.pathname === '/api/rooms') {
         requireHost(req); const room = await body(req) as Room; await rooms.createRoom(room); return reply(res, 201, room);
@@ -131,7 +172,7 @@ export async function createHostedRoomServer(
       const reportMatch = /^\/api\/rooms\/([^/]+)\/report$/.exec(url.pathname);
       if (reportMatch) {
         const code = decodeURIComponent(reportMatch[1]!);
-        if (req.method === 'GET') return reply(res, 200, await rooms.getMinutes(code, 'report'));
+        if (req.method === 'GET') { await authorizeRead(req, url, code); return reply(res, 200, await rooms.getMinutes(code, 'report')); }
         if (req.method === 'POST') {
           await authorizeRoomHost(req, code);
           const room = await rooms.getRoom(code); if (!room) throw new HumanSessionError('room_not_found');
@@ -163,19 +204,26 @@ export async function createHostedRoomServer(
       if (!match) return reply(res, 404, { error: 'not_found' });
       const code = decodeURIComponent(match[1]!); const action = match[2];
       if (req.method === 'GET' && !action) {
+        await authorizeRead(req, url, code);
         const room = await rooms.getRoom(code); return room ? reply(res, 200, room) : reply(res, 404, { error: 'room_not_found' });
       }
-      if (req.method === 'POST' && action === 'join') return reply(res, 200, await joins.join(code, await body(req) as never));
+      if (req.method === 'POST' && action === 'join') {
+        const participant = await joins.join(code, await body(req) as never);
+        if (!participant.authenticatedIdentity) throw new HumanSessionError('agent_identity_required');
+        await rooms.appendReceipt({ id: `member-roster:${participant.authenticatedIdentity.cardFingerprint}`, roomCode: code, kind: 'receipt', createdAt: Date.now(), payload: { memberName: participant.name, memberClient: participant.client } });
+        return reply(res, 200, { ...participant, participantToken: humans.issueAgentSession(code, participant.authenticatedIdentity).token });
+      }
       if (req.method === 'POST' && action === 'messages') {
         const session = await humans.verifySession(bearer(req) ?? '', code);
-        const message = await body(req) as Message;
-        if (message.client !== 'web' || message.name !== session.name) throw new HumanSessionError('human_identity_mismatch');
+        const supplied = await body(req) as Message;
         const room = await rooms.getRoom(code);
         const member = room?.participants.find(item => item.client === 'web' && item.name === session.name);
         if (!member?.authenticatedIdentity || member.authenticatedIdentity.cardName !== session.name) throw new HumanSessionError('human_membership_required');
+        if (supplied.client !== 'web' || supplied.name !== session.name || supplied.type !== 'msg' || supplied.role !== member.role || supplied.initials !== member.initials || supplied.color !== member.color || supplied.metadata !== undefined) throw new HumanSessionError('human_identity_mismatch');
+        const message: Message = { id: supplied.id, type: 'msg', name: member.name, role: member.role, initials: member.initials, color: member.color, client: 'web', text: supplied.text, time: supplied.time, attachments: supplied.attachments };
         return reply(res, 201, { sequence: await rooms.appendMessage(code, message) });
       }
-      if (req.method === 'GET' && action === 'messages') return reply(res, 200, await rooms.listMessages(code, Number(url.searchParams.get('from') ?? 0)));
+      if (req.method === 'GET' && action === 'messages') { await authorizeRead(req, url, code); return reply(res, 200, await rooms.listMessages(code, Number(url.searchParams.get('from') ?? 0))); }
       reply(res, 405, { error: 'method_not_allowed' });
     } catch (caught) { error(res, caught); }
   });

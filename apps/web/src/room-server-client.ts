@@ -13,12 +13,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return value;
 }
 
-export function getHostedRoom(code: string): Promise<Room> {
-  return request(`/api/rooms/${encodeURIComponent(code)}`);
+function readHeaders(token: string): HeadersInit { return token ? { authorization: `Bearer ${token}` } : {}; }
+
+export function getHostedRoom(code: string, token: string): Promise<Room> {
+  return request(`/api/rooms/${encodeURIComponent(code)}`, { headers: readHeaders(token) });
 }
 
-export function listHostedMessages(code: string, from: number): Promise<Message[]> {
-  return request(`/api/rooms/${encodeURIComponent(code)}/messages?from=${from}`);
+export function listHostedMessages(code: string, from: number, token: string): Promise<Message[]> {
+  return request(`/api/rooms/${encodeURIComponent(code)}/messages?from=${from}`, { headers: readHeaders(token) });
 }
 
 export async function appendHostedMessage(code: string, token: string, message: Message): Promise<void> {
@@ -58,5 +60,5 @@ export const appendHostedSystemMessage = (code: string, token: string, message: 
 export const getHostedTurnState = (code: string, token: string) => action<HostedTurnState | null>(code, token, { action: 'turn-state' });
 export const directHostedInvoke = (code: string, token: string, target: { name: string; client: ClientKind }) => action<boolean>(code, token, { action: 'direct-invoke', target });
 export const skipHostedCurrent = (code: string, token: string) => action<{ name: string; client: ClientKind; role: RoleInTurn } | null>(code, token, { action: 'skip-current' });
-export const getHostedReport = (code: string) => request<RoomReport | null>(`/api/rooms/${encodeURIComponent(code)}/report`);
+export const getHostedReport = (code: string, token: string) => request<RoomReport | null>(`/api/rooms/${encodeURIComponent(code)}/report`, { headers: readHeaders(token) });
 export const createHostedReport = (code: string, token: string) => request<RoomReport>(`/api/rooms/${encodeURIComponent(code)}/report`, { method: 'POST', headers: { authorization: `Bearer ${token}` } });

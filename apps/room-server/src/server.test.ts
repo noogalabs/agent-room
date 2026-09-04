@@ -1,4 +1,4 @@
-import { generateKeyPairSync } from 'node:crypto';
+import { createHmac, generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Server as HttpServer } from 'node:http';
 import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -110,6 +110,13 @@ describe('hosted room production entry', () => {
     const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
     response = await fetch(`${base}/api/rooms/ROOM1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }) });
     expect(response.status).toBe(200); expect(memory.current().participants).toHaveLength(1);
+    const joined = await response.json() as { participantToken: string };
+    const agentGet = await fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'get', code: 'ROOM1' }) });
+    expect(agentGet.status).toBe(200);
+    const agentMessage = { id: 12, type: 'msg', name: 'Agent A', role: 'forged', initials: 'ZZ', color: '#ffffff', client: 'cc', text: 'agent here', time: 12 };
+    const agentSend = await fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'send', code: 'ROOM1', message: agentMessage }) });
+    expect(agentSend.status).toBe(200);
+    expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ name: 'Agent A', client: 'cc', role: '', initials: 'AA', color: '#000000' }));
     const health = await (await fetch(`${base}/health`)).json() as Record<string, unknown>;
     expect(health).toStrictEqual({ ready: true, persistence: 'redis', memberAuth: 'required', trustKeyCount: 1 });
     expect(JSON.stringify(health)).not.toContain(trust.path);
@@ -177,7 +184,7 @@ describe('hosted room production entry', () => {
     (memory.records.getRoom as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('postgres://secret-host:5432'));
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const response = await fetch(`${base}/api/rooms/ROOM1`);
+    const response = await fetch(`${base}/api/rooms/ROOM1`, { headers: { authorization: 'Bearer host-test-token' } });
     expect(response.status).toBe(500);
     expect(await response.json()).toStrictEqual({ error: 'internal_error' });
   });
@@ -215,16 +222,26 @@ describe('hosted room production entry', () => {
     const session = await sessionResponse.json() as { token: string; participant: Room['participants'][number] };
     expect(session.participant.authenticatedIdentity).toMatchObject({ cardName: 'Sam', fleetId: 'hosted-room', scheme: 'oauth2', keyId: 'host-human-session' });
     expect(memory.current().participants[0]?.authenticatedIdentity).toEqual(session.participant.authenticatedIdentity);
-    const message = { id: 'm1', name: 'Sam', client: 'web', text: 'hello', ts: 10 };
+    const message = { id: 10, type: 'msg' as const, name: 'Sam', role: 'human', initials: 'SL', color: '#123456', client: 'web' as const, text: 'hello', time: 10 };
     let response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(message) });
     expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: 'Bearer read-only-watch-token', 'content-type': 'application/json' }, body: JSON.stringify(message) });
     expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
+    const liveWatch = await (await fetch(`${base}/api/rooms/ROOM1/watch-links`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    expect((await fetch(`${base}/api/rooms/ROOM1`, { headers: { authorization: `Bearer ${liveWatch.token}` } })).status).toBe(200);
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${liveWatch.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(await response.json()).toStrictEqual({ error: 'watch_session_read_only' });
+    expect(await (await fetch(`${base}/api/rooms/ROOM1`)).json()).toStrictEqual({ error: 'human_session_invalid' });
+    expect(await (await fetch(`${base}/api/rooms/ROOM1`, { headers: { authorization: 'Bearer malformed' } })).json()).toStrictEqual({ error: 'human_session_invalid' });
     const watch = await (await fetch(`${base}/api/rooms/ROOM1/watch-links?ttlMs=1`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
     await new Promise(resolve => setTimeout(resolve, 5));
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${watch.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
     expect(await response.json()).toStrictEqual({ error: 'watch_session_expired' });
+    response = await fetch(`${base}/api/rooms/ROOM1`, { headers: { authorization: `Bearer ${watch.token}` } });
+    expect(await response.json()).toStrictEqual({ error: 'watch_session_expired' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, name: 'Agent A', client: 'cc' }) });
+    expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, type: 'sys', role: 'host', metadata: { roleAtSend: 'host_directed' } }) });
     expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
     expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenCalledWith('ROOM1', message);
@@ -244,6 +261,26 @@ describe('hosted room production entry', () => {
     const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: issued.token, name: 'Sam' }) });
     expect(await response.json()).toStrictEqual({ error: 'human_invite_revoked' });
     expect(memory.records.updateRoom).not.toHaveBeenCalled();
+  });
+
+  it('checks human name and historical agent roster before burning an invite', async () => {
+    const trust = await trustFile(); const seeded = room();
+    seeded.participants = [{ name: 'Sam', role: 'human', color: '#111111', initials: 'SA', client: 'web', joinedAt: 1, lastSeenAt: 1 }];
+    const memory = memoryRecords(seeded); vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    let invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    let response = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Sam' }) });
+    expect(await response.json()).toStrictEqual({ error: 'human_name_taken' });
+    response = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Other' }) });
+    expect(response.status).toBe(200);
+
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: 'Agent A', role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
+    await fetch(`${base}/api/rooms/ROOM1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }) });
+    const current = memory.current(); await memory.records.updateRoom('ROOM1', current.version, { ...current, version: current.version + 1, participants: current.participants.filter(item => item.name !== 'Agent A') });
+    invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    response = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Agent A' }) });
+    expect(await response.json()).toStrictEqual({ error: 'human_name_taken' });
   });
 
   it('browser host creates a signed seat and issues a capability-bearing lobby invite', async () => {
@@ -272,6 +309,9 @@ describe('hosted room production entry', () => {
     await expect(authority.verifySession(tampered, 'ROOM1')).rejects.toMatchObject({ name: 'human_session_invalid' });
     now = session.expiresAt;
     await expect(authority.verifySession(session.token, 'ROOM1')).rejects.toMatchObject({ name: 'human_session_expired' });
+    const legacyPayload = Buffer.from(JSON.stringify({ purpose: 'session', roomCode: 'ROOM1', id: 'old', expiresAt: now + 100, name: 'Sam', role: 'human', client: 'web' })).toString('base64url');
+    const legacy = `${legacyPayload}.${createHmac('sha256', 's'.repeat(48)).update(legacyPayload).digest('base64url')}`;
+    await expect(authority.verifySession(legacy, 'ROOM1')).rejects.toMatchObject({ name: 'human_session_invalid' });
   });
 
   it('consumer census pins the durable server as the production image entry', async () => {
@@ -344,12 +384,12 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     const address = hosted.server.address(); if (!address || typeof address === 'string') throw new Error('listen');
     const base = `http://127.0.0.1:${address.port}`; const value = { ...room(), code };
     expect((await fetch(`${base}/api/rooms`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify(value) })).status).toBe(201);
-    expect((await (await fetch(`${base}/api/rooms/${code}`)).json() as Room).code).toBe(code);
+    expect((await (await fetch(`${base}/api/rooms/${code}`, { headers: { authorization: 'Bearer host-test-token' } })).json() as Room).code).toBe(code);
     const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
     const participant = { name: 'Agent A', role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
     const response = await fetch(`${base}/api/rooms/${code}/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }) });
     expect(response.status).toBe(200);
-    const persisted = await (await fetch(`${base}/api/rooms/${code}`)).json() as Room;
+    const persisted = await (await fetch(`${base}/api/rooms/${code}`, { headers: { authorization: 'Bearer host-test-token' } })).json() as Room;
     expect(persisted.participants).toHaveLength(1); expect(persisted.participants[0]?.authenticatedIdentity?.fleetId).toBe('fleet-a');
   });
 });

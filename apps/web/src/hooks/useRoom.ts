@@ -46,7 +46,7 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     const startedAt = Date.now();
     console.debug(traceTag, 'pullMessages.fire', { cursor: cursor.current, t: startedAt });
     try {
-      const fresh = await listHostedMessages(code, cursor.current);
+      const fresh = await listHostedMessages(code, cursor.current, sessionToken);
       console.debug(traceTag, 'pullMessages.fetched', {
         fresh: fresh.length,
         ms: Date.now() - startedAt,
@@ -93,16 +93,16 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     } finally {
       inFlightRef.current = null;
     }
-  }, [code]);
+  }, [code, sessionToken]);
 
   const pullRoom = useCallback(async () => {
     try {
-      const r = await getHostedRoom(code);
+      const r = await getHostedRoom(code, sessionToken);
       setState(s => ({ ...s, room: r }));
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }
-  }, [code]);
+  }, [code, sessionToken]);
 
   // Reset polling state to a clean slate and refetch from cursor 0. Used by
   // the visibilitychange handler (so a backgrounded tab returning gets a
@@ -121,8 +121,8 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     cursor.current = 0;
     try {
       const [r, fresh] = await Promise.all([
-        getHostedRoom(code),
-        listHostedMessages(code, 0),
+        getHostedRoom(code, sessionToken),
+        listHostedMessages(code, 0, sessionToken),
       ]);
       // Match server-side logical cursor (counter) so polling stays correct after LTRIM; legacy rooms fall back.
       cursor.current = fresh.length;
@@ -130,7 +130,7 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     } catch (e) {
       setState(s => ({ ...s, error: String(e) }));
     }
-  }, [code]);
+  }, [code, sessionToken]);
 
   useEffect(() => {
     cursor.current = 0;

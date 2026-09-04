@@ -26,7 +26,8 @@ export function Join() {
     const dashed = withDashes(raw);
     if (!isValidCode(dashed)) { setErr('Invalid code'); return; }
     setErr(null);
-    getHostedRoom(dashed)
+    const inviteToken = new URLSearchParams(window.location.search).get('invite') ?? '';
+    getHostedRoom(dashed, inviteToken)
       .then(setRoom)
       .catch(e => setErr(String(e).includes('room_not_found') ? 'Room not found' : String(e)));
   }, [raw]);

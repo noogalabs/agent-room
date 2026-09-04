@@ -23,7 +23,7 @@ export function Lobby() {
 
     async function refresh() {
       try {
-        const next = await getHostedRoom(code);
+        const next = await getHostedRoom(code, self?.token ?? '');
         if (!cancelled) setRoom(next);
       } catch (e) {
         if (cancelled) return;

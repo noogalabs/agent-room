@@ -11,7 +11,10 @@ export function Report() {
   const [refreshing, setRefreshing] = useState(false);
 
   useEffect(() => {
-    getHostedReport(code)
+    const stored = sessionStorage.getItem(`room:${code}:self`);
+    const sessionToken = stored ? (JSON.parse(stored) as { token?: string }).token : undefined;
+    const watchToken = new URLSearchParams(window.location.search).get('view') ?? undefined;
+    getHostedReport(code, sessionToken ?? watchToken ?? '')
       .then(found => {
         setReport(found);
         setMissing(!found);
