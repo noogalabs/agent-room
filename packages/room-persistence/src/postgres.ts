@@ -1,11 +1,11 @@
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from 'pg';
 import { POSTGRES_SCHEMA_SQL } from './schema.js';
-import { PersistenceSchemaError, type LeaseEventInput, type LeaseMembershipPrecondition, type RoomPersistence, type RoomReceipt } from './types.js';
+import { PersistenceSchemaError, type LeaseEventInput, type LeaseMembershipPrecondition, type RoomPersistence, type RoomReceipt, type StoredFleetTrustKey } from './types.js';
 import { sameJson } from './json.js';
 import { assertPostgresTargetAllowed } from './database-url.js';
 
-const REQUIRED_SCHEMA_VERSION = 1;
+const REQUIRED_SCHEMA_VERSION = 2;
 
 function value<T>(raw: unknown): T {
   return (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
@@ -387,6 +387,29 @@ export class PostgresRoomPersistence implements RoomPersistence {
       [code],
     );
     return result.rows.map(row => value<RoomReceipt>(row.receipt_json));
+  }
+
+  async listFleetTrustKeys(): Promise<StoredFleetTrustKey[]> {
+    const result = await this.pool.query<{ fleet_id: string; key_id: string; public_key_json: unknown }>(
+      'SELECT fleet_id, key_id, public_key_json FROM agent_room_fleet_trust_keys ORDER BY fleet_id, key_id',
+    );
+    return result.rows.map(row => ({ fleetId: row.fleet_id, keyId: row.key_id,
+      publicKey: value<Record<string, unknown>>(row.public_key_json) }));
+  }
+
+  async putFleetTrustKey(key: StoredFleetTrustKey): Promise<void> {
+    await this.pool.query(
+      `INSERT INTO agent_room_fleet_trust_keys (fleet_id, key_id, public_key_json, created_at)
+       VALUES ($1, $2, $3::jsonb, $4)
+       ON CONFLICT (fleet_id, key_id) DO UPDATE SET public_key_json = EXCLUDED.public_key_json`,
+      [key.fleetId, key.keyId, JSON.stringify(key.publicKey), Date.now()],
+    );
+  }
+
+  async deleteFleetTrustKey(fleetId: string, keyId: string): Promise<boolean> {
+    return count(await this.pool.query(
+      'DELETE FROM agent_room_fleet_trust_keys WHERE fleet_id = $1 AND key_id = $2', [fleetId, keyId],
+    )) === 1;
   }
 
   async close(): Promise<void> {

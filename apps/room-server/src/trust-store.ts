@@ -1,6 +1,6 @@
 import { createPublicKey, type JsonWebKey, type KeyObject } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import type { FleetTrustKey } from '@agent-room/room-persistence';
+import type { FleetTrustKey, StoredFleetTrustKey } from '@agent-room/room-persistence';
 
 export class TrustStoreError extends Error {
   constructor(readonly code: string, message: string) { super(message); this.name = code; }
@@ -8,11 +8,7 @@ export class TrustStoreError extends Error {
 
 interface StoredTrustKey { fleetId?: unknown; keyId?: unknown; publicKey?: unknown }
 
-export async function loadTrustStore(path: string | undefined): Promise<FleetTrustKey[]> {
-  if (!path?.trim()) throw new TrustStoreError('trust_store_required', 'AGENT_ROOM_TRUST_STORE is required.');
-  let parsed: unknown;
-  try { parsed = JSON.parse(await readFile(path, 'utf8')); }
-  catch { throw new TrustStoreError('trust_store_invalid', 'Trust store is unreadable or malformed.'); }
+export function validateStoredTrustKeys(parsed: unknown): StoredFleetTrustKey[] {
   if (!Array.isArray(parsed) || parsed.length === 0) {
     throw new TrustStoreError('trust_store_empty', 'Trust store must contain at least one public key.');
   }
@@ -34,6 +30,23 @@ export async function loadTrustStore(path: string | undefined): Promise<FleetTru
     if (key.type !== 'public' || key.asymmetricKeyType !== 'ed25519') {
       throw new TrustStoreError('trust_store_key_invalid', 'Trust store accepts only public Ed25519 keys.');
     }
-    return { fleetId: raw.fleetId, keyId: raw.keyId, publicKey: key };
+    return { fleetId: raw.fleetId, keyId: raw.keyId, publicKey: raw.publicKey as Record<string, unknown> };
   });
+}
+
+export function hydrateTrustKeys(stored: readonly StoredFleetTrustKey[]): FleetTrustKey[] {
+  return stored.map(raw => ({ fleetId: raw.fleetId, keyId: raw.keyId,
+    publicKey: createPublicKey({ key: raw.publicKey as JsonWebKey, format: 'jwk' }) }));
+}
+
+export async function loadStoredTrustStore(path: string | undefined): Promise<StoredFleetTrustKey[]> {
+  if (!path?.trim()) throw new TrustStoreError('trust_store_required', 'AGENT_ROOM_TRUST_STORE is required.');
+  let parsed: unknown;
+  try { parsed = JSON.parse(await readFile(path, 'utf8')); }
+  catch { throw new TrustStoreError('trust_store_invalid', 'Trust store is unreadable or malformed.'); }
+  return validateStoredTrustKeys(parsed);
+}
+
+export async function loadTrustStore(path: string | undefined): Promise<FleetTrustKey[]> {
+  return hydrateTrustKeys(await loadStoredTrustStore(path));
 }

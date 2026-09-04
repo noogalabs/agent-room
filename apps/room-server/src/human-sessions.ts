@@ -172,6 +172,13 @@ export class HumanSessionAuthority {
     const receipts = await this.rooms.listReceipts(roomCode);
     const watermark = receipts.find(item => item.id === `human-session:${session.identityFingerprint}:revoked`);
     if (Number(watermark?.payload.revokedAt ?? -1) >= session.issuedAt) throw new HumanSessionError('agent_session_revoked');
+    const room = await this.rooms.getRoom(roomCode);
+    const member = room?.participants.find(item => item.client === 'cc' &&
+      item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
+    if (!member?.authenticatedIdentity) throw new HumanSessionError('agent_session_invalid');
+    const trusted = (await this.rooms.listFleetTrustKeys()).some(key =>
+      key.fleetId === member.authenticatedIdentity!.fleetId && key.keyId === member.authenticatedIdentity!.keyId);
+    if (!trusted) throw new HumanSessionError('agent_fleet_revoked');
     return session;
   }
 

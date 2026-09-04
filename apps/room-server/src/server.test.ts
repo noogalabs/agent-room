@@ -5,7 +5,7 @@ import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Pool } from 'pg';
 import { RoomRecordServer, signAgentCard } from '@agent-room/room-persistence';
 import type { Room } from '@agent-room/shared';
@@ -33,6 +33,7 @@ function memoryRecords(initial = room()) {
   let current = structuredClone(initial);
   let refuseAtomicRemoval = false;
   let refuseAtomicJoin = false;
+  const trustKeys: Array<{ fleetId: string; keyId: string; publicKey: Readonly<Record<string, unknown>> }> = [];
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
     createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
@@ -74,14 +75,25 @@ function memoryRecords(initial = room()) {
       return true;
     }),
     listReceipts: vi.fn(async () => structuredClone(receipts)),
+    listFleetTrustKeys: vi.fn(async () => structuredClone(trustKeys)),
+    putFleetTrustKey: vi.fn(async (key: typeof trustKeys[number]) => {
+      const index = trustKeys.findIndex(item => item.fleetId === key.fleetId && item.keyId === key.keyId);
+      if (index >= 0) trustKeys[index] = structuredClone(key); else trustKeys.push(structuredClone(key));
+    }),
+    deleteFleetTrustKey: vi.fn(async (fleetId: string, keyId: string) => {
+      const index = trustKeys.findIndex(item => item.fleetId === fleetId && item.keyId === keyId);
+      if (index < 0) return false;
+      trustKeys.splice(index, 1); return true;
+    }),
   } as unknown as RoomRecordServer;
   return { records, current: () => current, receipts: () => structuredClone(receipts),
     refuseAtomicRemoval: () => { refuseAtomicRemoval = true; },
-    refuseAtomicJoin: () => { refuseAtomicJoin = true; } };
+    refuseAtomicJoin: () => { refuseAtomicJoin = true; }, trustKeys: () => structuredClone(trustKeys) };
 }
 
 function hostedEnv(path: string, extra: Record<string, string | undefined> = {}) {
-  return { AGENT_ROOM_TRUST_STORE: path, AGENT_ROOM_HUMAN_SESSION_SECRET: 'h'.repeat(48), AGENT_ROOM_HOST_TOKEN: 'host-test-token', ...extra };
+  return { AGENT_ROOM_TRUST_STORE: path, AGENT_ROOM_HUMAN_SESSION_SECRET: 'h'.repeat(48),
+    AGENT_ROOM_HOST_TOKEN: 'host-test-token', AGENT_ROOM_ADMIN_TOKEN: 'admin-test-token', ...extra };
 }
 
 async function listenHosted(hosted: Awaited<ReturnType<typeof createHostedRoomServer>>) {
@@ -119,8 +131,8 @@ function hasUnrestrictedBuildContextInstruction(dockerfile: string): boolean {
 }
 
 describe('hosted room production entry', () => {
-  it('refuses every invalid trust store through the production entry before persistence or listen', async () => {
-    const fromEnvironment = vi.spyOn(RoomRecordServer, 'fromEnvironment');
+  it('refuses every invalid first-boot trust store before listen', async () => {
+    const memory = memoryRecords(); const fromEnvironment = vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const listen = vi.spyOn(HttpServer.prototype, 'listen');
     await expect(startHostedRoomServer({})).rejects.toMatchObject({ name: 'trust_store_required' });
     const dir = await mkdtemp(join(tmpdir(), 'bad-trust-')); const bad = join(dir, 'bad.json');
@@ -140,8 +152,17 @@ describe('hosted room production entry', () => {
     const pub = keys.publicKey.export({ format: 'jwk' });
     await writeFile(bad, JSON.stringify([{ fleetId: 'a', keyId: 'k', publicKey: pub }, { fleetId: 'a', keyId: 'k', publicKey: pub }]));
     await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_duplicate_key' });
-    expect(fromEnvironment).not.toHaveBeenCalled();
+    expect(fromEnvironment).toHaveBeenCalled();
     expect(listen).not.toHaveBeenCalled();
+  });
+
+  it('starts from persisted fleet trust without retaining the seed file as a runtime dependency', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const seeded = await createHostedRoomServer(hostedEnv(trust.path)); await seeded.rooms.close();
+    const restarted = await createHostedRoomServer(hostedEnv('/missing-after-first-boot.json'));
+    const base = await listenHosted(restarted);
+    expect(await (await fetch(`${base}/health`)).json()).toMatchObject({ trustKeyCount: 1 });
   });
 
   it('keeps the production agent post path server-owned and unchanged', async () => {
@@ -202,14 +223,14 @@ describe('hosted room production entry', () => {
     });
     const alien = generateKeyPairSync('ed25519');
     const invalidCards = [
-      signAgentCard(card, 'key-a', alien.privateKey),
-      signAgentCard({ ...card, fleetId: 'fleet-b' }, 'key-a', trust.privateKey),
-      signAgentCard(card, 'key-b', trust.privateKey),
+      { signed: signAgentCard(card, 'key-a', alien.privateKey), error: 'agent_card_signature_invalid' },
+      { signed: signAgentCard({ ...card, fleetId: 'fleet-b' }, 'key-a', trust.privateKey), error: 'agent_fleet_not_trusted' },
+      { signed: signAgentCard(card, 'key-b', trust.privateKey), error: 'agent_fleet_not_trusted' },
     ];
-    for (const signed of invalidCards) {
+    for (const { signed, error } of invalidCards) {
       const response = await post('ROOM1', signed);
       expect(response.status).toBe(400);
-      expect(await response.json()).toStrictEqual({ error: 'agent_card_signature_invalid' });
+      expect(await response.json()).toStrictEqual({ error });
     }
     expect((memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
 
@@ -578,6 +599,127 @@ describe('hosted room production entry', () => {
     expect(memory.current().participants.map(item => item.name)).toEqual(['Code Guest']);
   });
 
+  it('persists host-managed fleet trust, applies it immediately, and keeps revocation across restart', async () => {
+    const seed = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const firstBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
+    const alreadyRunningSecondBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
+    const creator = await (await fetch(`${firstBase}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'TRUST1' }),
+    })).json() as { token: string };
+    const created = await (await fetch(`${firstBase}/api/browser-rooms`, {
+      method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'TRUST1', topic: 'trust', name: 'Host', role: '', color: '#123456', initials: 'HO' }),
+    })).json() as { token: string };
+    const addedKeys = generateKeyPairSync('ed25519');
+    const added = { fleetId: 'fleet-b', keyId: 'key-b', publicKey: addedKeys.publicKey.export({ format: 'jwk' }) };
+    let response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer ', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    const privateKey = { ...added, keyId: 'private-key', publicKey: addedKeys.privateKey.export({ format: 'jwk' }) };
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' }, body: JSON.stringify([privateKey]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'trust_store_key_invalid' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(response.status).toBe(201);
+    for (const attempt of [
+      { method: 'GET', path: '/api/fleet-trust' },
+      { method: 'DELETE', path: '/api/fleet-trust/fleet-b/key-b' },
+    ]) {
+      response = await fetch(`${firstBase}${attempt.path}`, { method: attempt.method, headers: { authorization: `Bearer ${created.token}` } });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    }
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-b', name: 'Agent B', url: 'https://fleet.invalid/b', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: 'Agent B', role: '', color: '#000000', initials: 'AB', client: 'cc' as const };
+    response = await fetch(`${alreadyRunningSecondBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
+    expect(response.status).toBe(200);
+    const seated = await response.json() as { participantToken: string };
+    // Simulate a different replica mutating the shared store: neither running
+    // server receives an in-process refresh callback.
+    expect(await memory.records.deleteFleetTrustKey('fleet-b', 'key-b')).toBe(true);
+    response = await fetch(`${alreadyRunningSecondBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
+    expect(await response.json()).toStrictEqual({ error: 'agent_fleet_not_trusted' });
+    for (const action of ['get', 'messages', 'send'] as const) {
+      response = await fetch(`${firstBase}/api/room`, {
+        method: 'POST', headers: { authorization: `Bearer ${seated.participantToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ action, code: 'TRUST1', cursor: 0,
+          message: { id: 1, type: 'msg', name: card.name, role: '', color: '#000000', initials: 'AB', client: 'cc', text: 'after revoke', time: 1 } }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toStrictEqual({ error: 'agent_fleet_revoked' });
+    }
+    await memory.records.putFleetTrustKey(added);
+    response = await fetch(`${firstBase}/api/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: 'Bearer admin-test-token' } });
+    expect(response.status).toBe(200);
+
+    const restartedBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
+    expect(memory.trustKeys().map(key => `${key.fleetId}:${key.keyId}`)).toEqual(['fleet-a:key-a']);
+    expect(await (await fetch(`${restartedBase}/health`)).json()).toMatchObject({ trustKeyCount: 1 });
+  });
+
+  it('fails the global trust door closed when its separate admin credential is unset', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_ADMIN_TOKEN: undefined })));
+    const response = await fetch(`${base}/api/fleet-trust`, {
+      method: 'GET', headers: { authorization: 'Bearer host-test-token' },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+  });
+
+  it('does not let the fleet-trust admin credential mint rooms', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const response = await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'ADMIN1' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+  });
+
+  it('keeps host and fleet-trust admin credentials inside their 2x2 route boundary', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const cells = [
+      { tokenKind: 'host', routeFamily: 'trust', token: 'host-test-token', path: '/api/fleet-trust', expected: 400 },
+      { tokenKind: 'admin', routeFamily: 'trust', token: 'admin-test-token', path: '/api/fleet-trust', expected: 200 },
+      { tokenKind: 'host', routeFamily: 'room-mint', token: 'host-test-token', path: '/api/browser-creator-invites', expected: 201 },
+      { tokenKind: 'admin', routeFamily: 'room-mint', token: 'admin-test-token', path: '/api/browser-creator-invites', expected: 400 },
+    ] as const;
+    for (const cell of cells) {
+      const response = await fetch(`${base}${cell.path}`, {
+        method: cell.routeFamily === 'trust' ? 'GET' : 'POST',
+        headers: { authorization: `Bearer ${cell.token}`, 'content-type': 'application/json' },
+        body: cell.routeFamily === 'room-mint' ? JSON.stringify({ code: `AUTH${cell.tokenKind}` }) : undefined,
+      });
+      expect([cell.tokenKind, cell.routeFamily, response.status]).toStrictEqual([
+        cell.tokenKind, cell.routeFamily, cell.expected,
+      ]);
+    }
+  });
+
   it('refuses unauthenticated browser creation and a signed overwrite of a live room', async () => {
     const trust = await trustFile(); const memory = memoryRecords(); vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
@@ -769,9 +911,13 @@ describe('hosted room production entry', () => {
   });
 
   it('issues a rejoined agent strictly after an identity watermark in the same millisecond', async () => {
-    const memory = memoryRecords(); const now = 1_000;
+    const now = 1_000;
     const identity = { cardFingerprint: 'agent-watermark', fleetId: 'fleet-a', cardName: 'Agent Watermark',
       scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: now };
+    const memory = memoryRecords({ ...room(), participants: [{ name: identity.cardName, role: 'agent',
+      color: '#000000', initials: 'AW', client: 'cc', joinedAt: now, lastSeenAt: now,
+      authenticatedIdentity: identity }] });
+    await memory.records.putFleetTrustKey({ fleetId: identity.fleetId, keyId: identity.keyId, publicKey: {} });
     await memory.records.appendReceipt({ id: `human-session:${identity.cardFingerprint}:revoked`,
       roomCode: 'ROOM1', kind: 'receipt', createdAt: now,
       payload: { event: 'human_session_revoked', identityFingerprint: identity.cardFingerprint, revokedAt: now } });
@@ -817,6 +963,12 @@ describe('hosted room production entry', () => {
     expect(lobbyScreen).toContain('issueHostedInvite');
     expect(lobbyScreen).toContain('invite.joinPath');
     expect(lobbyScreen).toContain('revokeHostedInvite');
+    expect(lobbyScreen).toContain('listHostedFleetTrust');
+    expect(lobbyScreen).toContain('addHostedFleetTrust');
+    expect(lobbyScreen).toContain('revokeHostedFleetTrust');
+    expect(webClient).toContain('listHostedFleetTrust');
+    expect(webClient).toContain('addHostedFleetTrust');
+    expect(webClient).toContain('revokeHostedFleetTrust');
     expect(lobbyScreen).not.toContain('`${window.location.origin}/j/${code}`');
     expect(createScreen).toContain('persistHumanSeat');
     expect(joinScreen).toContain('persistHumanSeat');
@@ -934,6 +1086,10 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     await expectAppendFailureRollsBack(hosted, code, () => fetch(`${base}/api/rooms/${code}/actions`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ action: 'remove', targetName: 'Host Removed', targetClient: 'web' }) }));
   });
 
+  beforeEach(async () => {
+    const pool = new Pool({ connectionString: postgresUrl });
+    try { await pool.query('TRUNCATE agent_room_fleet_trust_keys'); } finally { await pool.end(); }
+  });
   it('creates, reads, and authenticates a member through the real hosted entry', async () => {
     const trust = await trustFile(); const code = `PG${Date.now()}`;
     const hosted = await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl }));

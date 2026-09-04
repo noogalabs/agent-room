@@ -54,7 +54,7 @@ describePostgres('Postgres durable room production entry', () => {
       AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
     });
     // Synthetic CI database dedicated to this job; clearing it makes retries deterministic.
-    await admin.query(`TRUNCATE agent_room_receipts, agent_room_minutes, agent_room_task_boards,
+    await admin.query(`TRUNCATE agent_room_fleet_trust_keys, agent_room_receipts, agent_room_minutes, agent_room_task_boards,
       agent_room_messages, agent_room_rooms CASCADE`);
   });
 
@@ -90,6 +90,22 @@ describePostgres('Postgres durable room production entry', () => {
       createdAt: 1_700_000_000_450, payload: { disposition: 'accepted' },
     };
     await proveImmutableRecordParity(first.persistence, parityRoom, parityReport, parityReceipt);
+  });
+
+  it('keeps fleet trust keys across server restarts and removes only the selected key', async () => {
+    const firstPair = generateKeyPairSync('ed25519'); const secondPair = generateKeyPairSync('ed25519');
+    const firstKey = { fleetId: 'fleet-one', keyId: 'key-one', publicKey: firstPair.publicKey.export({ format: 'jwk' }) };
+    const secondKey = { fleetId: 'fleet-two', keyId: 'key-two', publicKey: secondPair.publicKey.export({ format: 'jwk' }) };
+    await first.putFleetTrustKey(firstKey); await first.putFleetTrustKey(secondKey);
+    const restarted = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
+    });
+    try {
+      expect(await restarted.listFleetTrustKeys()).toEqual([firstKey, secondKey]);
+      expect(await restarted.deleteFleetTrustKey('fleet-one', 'key-one')).toBe(true);
+      expect(await restarted.listFleetTrustKeys()).toEqual([secondKey]);
+      expect(await restarted.deleteFleetTrustKey('fleet-two', 'key-two')).toBe(true);
+    } finally { await restarted.close(); }
   });
 
   it('survives a server restart and a 25-hour clock skip with every durable record family', async () => {

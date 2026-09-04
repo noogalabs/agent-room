@@ -62,6 +62,9 @@ class MemoryPersistence implements RoomPersistence {
   async deleteReceipt() { return false; }
   async appendLeaseEvent() { return false; }
   async listReceipts() { return []; }
+  async listFleetTrustKeys() { return []; }
+  async putFleetTrustKey() {}
+  async deleteFleetTrustKey() { return false; }
   async close() {}
 }
 
@@ -172,7 +175,7 @@ describe('authenticated room join production entry', () => {
       .toThrow(/must be legacy or required/);
   });
 
-  it('refuses an unknown Agent Card kid without falling back to another fleet key', () => {
+  it('distinguishes an untrusted Agent Card kid from an invalid signature', () => {
     const trusted = generateKeyPairSync('ed25519');
     const signed = signAgentCard(card(), 'unknown-kid', trusted.privateKey);
     const verifier = new AgentCardVerifier([
@@ -180,6 +183,10 @@ describe('authenticated room join production entry', () => {
     ]);
 
     expect(() => verifier.verify(signed, 'oauth2'))
+      .toThrowError(expect.objectContaining({ name: 'agent_fleet_not_trusted' }));
+
+    const malformed = signAgentCard(card(), 'trusted-kid', generateKeyPairSync('ed25519').privateKey);
+    expect(() => verifier.verify(malformed, 'oauth2'))
       .toThrowError(expect.objectContaining({ name: 'agent_card_signature_invalid' }));
   });
 

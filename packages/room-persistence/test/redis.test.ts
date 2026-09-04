@@ -156,6 +156,25 @@ class LeaseCasRedis implements UpstashClient {
   async pipeline<T>(): Promise<T[]> { return []; }
 }
 
+class FleetTrustRedis implements UpstashClient {
+  private readonly values = new Map<string, string>();
+  private readonly ids = new Set<string>();
+  async command<T>(command: readonly (string | number)[]): Promise<T> {
+    if (command[0] === 'SMEMBERS') return [...this.ids] as T;
+    if (command[0] === 'MGET') return command.slice(1).map(key => this.values.get(String(key)) ?? null) as T;
+    throw new Error(`Unsupported fleet trust command ${String(command[0])}`);
+  }
+  async pipeline<T>(commands: readonly (readonly (string | number)[])[]): Promise<T[]> {
+    return commands.map(command => {
+      if (command[0] === 'SET') { this.values.set(String(command[1]), String(command[2])); return 'OK' as T; }
+      if (command[0] === 'SADD') { const size = this.ids.size; this.ids.add(String(command[2])); return Number(this.ids.size !== size) as T; }
+      if (command[0] === 'DEL') { const removed = this.values.delete(String(command[1])); return Number(removed) as T; }
+      if (command[0] === 'SREM') { const removed = this.ids.delete(String(command[2])); return Number(removed) as T; }
+      throw new Error(`Unsupported fleet trust pipeline ${String(command[0])}`);
+    });
+  }
+}
+
 const leaseAlice: LeaseActor = { memberId: 'redis-alice', name: 'Alice', client: 'cc' };
 const leaseBob: LeaseActor = { memberId: 'redis-bob', name: 'Bob', client: 'cc' };
 
@@ -252,6 +271,16 @@ describe('RedisRoomPersistence compatibility', () => {
   it('matches the durable adapter collision contract for minutes and receipts', async () => {
     const store = new RedisRoomPersistence(new StatefulRedis());
     await proveImmutableRecordParity(store, room(), report(), receipt());
+  });
+
+  it('persists and selectively revokes fleet trust keys without a room TTL', async () => {
+    const store = new RedisRoomPersistence(new FleetTrustRedis());
+    const first = { fleetId: 'fleet-one', keyId: 'key-one', publicKey: { kty: 'OKP', crv: 'Ed25519', x: 'one' } };
+    const second = { fleetId: 'fleet-two', keyId: 'key-two', publicKey: { kty: 'OKP', crv: 'Ed25519', x: 'two' } };
+    await store.putFleetTrustKey(first); await store.putFleetTrustKey(second);
+    expect(await store.listFleetTrustKeys()).toEqual([first, second]);
+    expect(await store.deleteFleetTrustKey('fleet-one', 'key-one')).toBe(true);
+    expect(await store.listFleetTrustKeys()).toEqual([second]);
   });
 
   it('sends the board transition and lease receipts through one Redis script', async () => {

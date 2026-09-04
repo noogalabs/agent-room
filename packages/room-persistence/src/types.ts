@@ -37,6 +37,12 @@ export interface LeaseMembershipPrecondition {
   }[];
 }
 
+export interface StoredFleetTrustKey {
+  fleetId: string;
+  keyId: string;
+  publicKey: Readonly<Record<string, unknown>>;
+}
+
 export interface RoomPersistence {
   readonly kind: PersistenceKind;
 
@@ -88,6 +94,10 @@ export interface RoomPersistence {
   deleteReceipt(code: string, receiptId: string): Promise<boolean>;
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean>;
   listReceipts(code: string): Promise<RoomReceipt[]>;
+
+  listFleetTrustKeys(): Promise<StoredFleetTrustKey[]>;
+  putFleetTrustKey(key: StoredFleetTrustKey): Promise<void>;
+  deleteFleetTrustKey(fleetId: string, keyId: string): Promise<boolean>;
 
   close(): Promise<void>;
 }

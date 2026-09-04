@@ -4,7 +4,7 @@ import type { Room } from '@agent-room/shared';
 import { ROOM_POLL_MS } from '@agent-room/shared';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
-import { getHostedRoom, issueHostedInvite, revokeHostedInvite } from '../room-server-client.js';
+import { addHostedFleetTrust, getHostedRoom, issueHostedInvite, listHostedFleetTrust, revokeHostedFleetTrust, revokeHostedInvite, type HostedFleetTrustKey } from '../room-server-client.js';
 import { copyText } from '../lib/copy.js';
 import { templateById, roleLabelFor } from '../lib/templates.js';
 
@@ -16,6 +16,9 @@ export function Lobby() {
   const [joinUrl, setJoinUrl] = useState('');
   const [inviteId, setInviteId] = useState('');
   const [hostToken, setHostToken] = useState('');
+  const [trustKeys, setTrustKeys] = useState<HostedFleetTrustKey[]>([]);
+  const [trustText, setTrustText] = useState('');
+  const [adminToken, setAdminToken] = useState('');
 
   useEffect(() => {
     const stored = sessionStorage.getItem(`room:${code}:self`);
@@ -87,6 +90,35 @@ export function Lobby() {
       }} className="w-full mb-4 text-[10px] font-semibold text-red-600 hover:underline disabled:opacity-40">
         Revoke this invite link
       </button>
+
+      <div className="mb-6 rounded-lg border border-border p-3">
+        <div className="text-xs font-semibold mb-1">Trust a fleet</div>
+        <p className="text-[10px] text-ink-soft mb-2">Server-admin access is required. The credential stays in this page only.</p>
+        <input type="password" value={adminToken} onChange={event => setAdminToken(event.target.value)}
+          className="mb-2 w-full rounded border border-border p-2 text-[10px]" placeholder="Server admin token" />
+        <button onClick={() => { void listHostedFleetTrust(adminToken).then(setTrustKeys).catch(error => setErr(String(error))); }}
+          className="mb-2 w-full rounded border border-border px-3 py-2 text-xs font-semibold">Load trusted fleets</button>
+        <p className="text-[10px] text-ink-soft mb-2">Paste the public fleet key file. Private keys are refused.</p>
+        <textarea value={trustText} onChange={event => setTrustText(event.target.value)} rows={3}
+          className="w-full rounded border border-border p-2 font-mono text-[9px]" placeholder='[{"fleetId":"...","keyId":"...","publicKey":{...}}]' />
+        <button onClick={() => {
+          try {
+            const parsed = JSON.parse(trustText) as unknown;
+            if (!Array.isArray(parsed) || parsed.length !== 1) throw new Error('Paste one public fleet key.');
+            const key = parsed[0] as HostedFleetTrustKey;
+            void addHostedFleetTrust(adminToken, key).then(saved => {
+              setTrustKeys(current => [...current.filter(item => item.fleetId !== saved.fleetId || item.keyId !== saved.keyId), saved]);
+              setTrustText('');
+            }).catch(error => setErr(String(error)));
+          } catch (error) { setErr(error instanceof Error ? error.message : String(error)); }
+        }} className="mt-2 w-full rounded bg-ink px-3 py-2 text-xs font-semibold text-white">Trust this fleet</button>
+        <div className="mt-2 space-y-1">
+          {trustKeys.map(key => <div key={`${key.fleetId}:${key.keyId}`} className="flex items-center justify-between text-[10px]">
+            <span><b>{key.fleetId}</b> · {key.keyId}</span>
+            <button onClick={() => { void revokeHostedFleetTrust(adminToken, key.fleetId, key.keyId).then(() => setTrustKeys(current => current.filter(item => item !== key))); }} className="text-red-600">Revoke</button>
+          </div>)}
+        </div>
+      </div>
 
       {template && template.suggestedRoleIds.length > 0 && (
         <div className="mb-6 rounded-lg border border-accent-tint-border bg-accent-tint/40 p-3">
