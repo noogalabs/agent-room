@@ -19,6 +19,11 @@ export function getHostedRoom(code: string, token: string): Promise<Room> {
   return request(`/api/rooms/${encodeURIComponent(code)}`, { headers: readHeaders(token) });
 }
 
+export interface HostedJoinInfo { code: string; topic: string; createdBy: string; status: 'active'; participantCount: number }
+export function getHostedJoinInfo(code: string): Promise<HostedJoinInfo> {
+  return request(`/api/rooms/${encodeURIComponent(code)}/join-info`);
+}
+
 export function listHostedMessages(code: string, from: number, token: string): Promise<Message[]> {
   return request(`/api/rooms/${encodeURIComponent(code)}/messages?from=${from}`, { headers: readHeaders(token) });
 }
@@ -37,6 +42,18 @@ export function exchangeHumanInvite(code: string, inviteToken: string, input: { 
   });
 }
 
+export function touchHostedHumanPresence(code: string, token: string) {
+  return request<{ lastSeenAt: number }>(`/api/rooms/${encodeURIComponent(code)}/human-presence`, {
+    method: 'POST', headers: { authorization: `Bearer ${token}` },
+  });
+}
+
+export function leaveHostedHumanRoom(code: string, token: string) {
+  return request<Room>(`/api/rooms/${encodeURIComponent(code)}/human-session`, {
+    method: 'DELETE', headers: { authorization: `Bearer ${token}` },
+  });
+}
+
 export function createHostedBrowserRoom(creatorToken: string, input: { code: string; topic: string; name: string; role: string; color: string; initials: string }) {
   return request<{ room: Room; token: string; participant: Room['participants'][number] }>('/api/browser-rooms', {
     method: 'POST', headers: { authorization: `Bearer ${creatorToken}`, 'content-type': 'application/json' }, body: JSON.stringify(input),
@@ -45,6 +62,12 @@ export function createHostedBrowserRoom(creatorToken: string, input: { code: str
 
 export function issueHostedInvite(code: string, token: string) {
   return request<{ id: string; token: string; joinPath: string }>(`/api/rooms/${encodeURIComponent(code)}/human-invites`, { method: 'POST', headers: { authorization: `Bearer ${token}` } });
+}
+
+export function revokeHostedInvite(code: string, token: string, inviteId: string) {
+  return request<{ revoked: true }>(`/api/rooms/${encodeURIComponent(code)}/human-invites/${encodeURIComponent(inviteId)}`, {
+    method: 'DELETE', headers: { authorization: `Bearer ${token}` },
+  });
 }
 
 async function action<T>(code: string, token: string, value: Record<string, unknown>): Promise<T> {

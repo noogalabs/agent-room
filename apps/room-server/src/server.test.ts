@@ -249,7 +249,7 @@ describe('hosted room production entry', () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
-    const inviteResponse = await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } });
+    const inviteResponse = await fetch(`${base}/api/rooms/ROOM1/human-invites?singleUse=true`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } });
     expect(inviteResponse.status).toBe(201);
     const invite = await inviteResponse.json() as { id: string; token: string; joinPath: string };
     expect(invite.joinPath).toBe(`/j/ROOM1?invite=${encodeURIComponent(invite.token)}`);
@@ -389,7 +389,7 @@ describe('hosted room production entry', () => {
     expect(memory.current().participants.some(item => item.name === 'Sam')).toBe(false);
     const after = await post();
     expect(after.status).toBe(400);
-    expect(await after.json()).toStrictEqual({ error: 'human_membership_required' });
+    expect(await after.json()).toStrictEqual({ error: 'human_session_revoked' });
   });
 
   it('checks human name and historical agent roster before burning an invite', async () => {
@@ -417,7 +417,7 @@ describe('hosted room production entry', () => {
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
     const creator = await (await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01' }) })).json() as { token: string; createPath: string };
-    expect(creator.createPath).toContain('creator=');
+    expect(creator.createPath).toBe(`/new?code=WEB01&creator=${encodeURIComponent(creator.token)}`);
     const createdResponse = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01', topic: 'demo', name: 'David', role: 'host', color: '#123456', initials: 'DH' }) });
     expect(createdResponse.status).toBe(201);
     const created = await createdResponse.json() as { token: string; participant: Room['participants'][number] };
@@ -435,6 +435,68 @@ describe('hosted room production entry', () => {
     const action = await fetch(`${base}/api/rooms/WEB01/actions`, { method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'system-message', message: forged }) });
     expect(action.status).toBe(200);
     expect(memory.records.appendMessage).toHaveBeenCalledWith('WEB01', { id: 3, type: 'sys', name: 'David', role: 'host', initials: 'DH', color: '#123456', client: 'web', text: 'host note', time: 3, attachments: undefined });
+  });
+
+  it('keeps a room-lifetime human invite reusable, revokes only future joins, refreshes presence, and frees a seat on leave', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const issued = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+    })).json() as { id: string; token: string; expiresAt: number };
+    expect(issued.expiresAt).toBe(Number.MAX_SAFE_INTEGER);
+    const joinHuman = async (name: string, inviteToken = issued.token) => {
+      const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ inviteToken, name, role: '', color: '#123456', initials: name.slice(0, 2).toUpperCase() }),
+      });
+      return { response, body: await response.json() as { token: string; participant: Room['participants'][number]; error?: string } };
+    };
+    const alice = await joinHuman('Alice'); const bob = await joinHuman('Bob');
+    expect(alice.response.status).toBe(200); expect(bob.response.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Alice', 'Bob']);
+
+    const beforePresence = memory.current().participants[0]!.lastSeenAt;
+    await new Promise(resolve => setTimeout(resolve, 2));
+    const presence = await fetch(`${base}/api/rooms/ROOM1/human-presence`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}` } });
+    expect(presence.status).toBe(200);
+    expect(memory.current().participants[0]!.lastSeenAt).toBeGreaterThan(beforePresence);
+
+    await fetch(`${base}/api/rooms/ROOM1/human-invites/${issued.id}`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
+    const existingPost = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 90, type: 'msg', name: 'Alice', role: '', initials: 'AL', color: '#123456', client: 'web', text: 'still seated', time: 90 }) });
+    expect(existingPost.status).toBe(201);
+    expect((await joinHuman('Charlie')).body).toMatchObject({ error: 'human_invite_revoked' });
+
+    const leave = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'DELETE', headers: { authorization: `Bearer ${alice.body.token}` } });
+    expect(leave.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Bob']);
+    expect(memory.receipts().some(item => item.id === `member-roster:${alice.body.participant.authenticatedIdentity!.cardFingerprint}`)).toBe(false);
+    expect(memory.receipts()).toContainEqual(expect.objectContaining({
+      id: `human-session:${alice.body.participant.authenticatedIdentity!.cardFingerprint}:revoked`,
+      payload: expect.objectContaining({ event: 'human_session_revoked' }),
+    }));
+    const departedPost = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${alice.body.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 91, type: 'msg', name: 'Alice', role: '', initials: 'AL', color: '#123456', client: 'web', text: 'departed', time: 91 }) });
+    expect(await departedPost.json()).toStrictEqual({ error: 'human_session_revoked' });
+    const revokedRejoin = await joinHuman('Alice');
+    expect(revokedRejoin.response.status).toBe(400);
+    expect(revokedRejoin.body).toMatchObject({ error: 'human_invite_revoked' });
+
+    const replacementInvite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    const rejoined = await joinHuman('Alice', replacementInvite.token);
+    expect(rejoined.response.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name).sort()).toEqual(['Alice', 'Bob']);
+  });
+
+  it('lets a person with the room code use an active room-lifetime invite without exposing the room record', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } });
+    const info = await fetch(`${base}/api/rooms/ROOM1/join-info`);
+    expect(await info.json()).toStrictEqual({ code: 'ROOM1', topic: 'test', createdBy: 'host', status: 'active', participantCount: 0 });
+    const joined = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Code Guest', role: '', color: '#123456', initials: 'CG' }) });
+    expect(joined.status).toBe(200);
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Code Guest']);
   });
 
   it('refuses unauthenticated browser creation and a signed overwrite of a live room', async () => {
@@ -634,6 +696,8 @@ describe('hosted room production entry', () => {
     const entry = await readFile(new URL('apps/room-server/src/server.ts', root), 'utf8');
     const joinScreen = await readFile(new URL('apps/web/src/screens/Join.tsx', root), 'utf8');
     const lobbyScreen = await readFile(new URL('apps/web/src/screens/Lobby.tsx', root), 'utf8');
+    const createScreen = await readFile(new URL('apps/web/src/screens/CreateMeeting.tsx', root), 'utf8');
+    const roomScreen = await readFile(new URL('apps/web/src/screens/Room.tsx', root), 'utf8');
     const roomHook = await readFile(new URL('apps/web/src/hooks/useRoom.ts', root), 'utf8');
     const webClient = await readFile(new URL('apps/web/src/room-server-client.ts', root), 'utf8');
     expect(docker).toContain('CMD ["node", "apps/room-server/dist/index.js"]');
@@ -658,7 +722,15 @@ describe('hosted room production entry', () => {
     expect(joinScreen).toContain('exchangeHumanInvite');
     expect(lobbyScreen).toContain('issueHostedInvite');
     expect(lobbyScreen).toContain('invite.joinPath');
+    expect(lobbyScreen).toContain('revokeHostedInvite');
     expect(lobbyScreen).not.toContain('`${window.location.origin}/j/${code}`');
+    expect(createScreen).toContain('persistHumanSeat');
+    expect(joinScreen).toContain('persistHumanSeat');
+    expect(roomScreen).toContain('loadHumanSeat');
+    expect(roomScreen).toContain('touchHostedHumanPresence');
+    expect(roomScreen).toContain('60_000');
+    expect(roomScreen).toContain('leaveHostedHumanRoom');
+    expect(roomScreen).toContain('clearHumanSeat');
     expect(roomHook).toContain('appendHostedMessage');
     expect(`${joinScreen}\n${roomHook}`).not.toContain('@agent-room/upstash-client');
     expect(webClient).toContain('ENV.roomServerBaseUrl');

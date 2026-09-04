@@ -4,7 +4,7 @@ import type { Room } from '@agent-room/shared';
 import { ROOM_POLL_MS } from '@agent-room/shared';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
-import { getHostedRoom, issueHostedInvite } from '../room-server-client.js';
+import { getHostedRoom, issueHostedInvite, revokeHostedInvite } from '../room-server-client.js';
 import { copyText } from '../lib/copy.js';
 import { templateById, roleLabelFor } from '../lib/templates.js';
 
@@ -14,6 +14,8 @@ export function Lobby() {
   const [room, setRoom] = useState<Room | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [joinUrl, setJoinUrl] = useState('');
+  const [inviteId, setInviteId] = useState('');
+  const [hostToken, setHostToken] = useState('');
 
   useEffect(() => {
     const stored = sessionStorage.getItem(`room:${code}:self`);
@@ -31,8 +33,9 @@ export function Lobby() {
       }
     }
     if (!self?.token) { setErr('Host session required'); return; }
+    setHostToken(self.token);
     issueHostedInvite(code, self.token)
-      .then(invite => { if (!cancelled) setJoinUrl(`${window.location.origin}${invite.joinPath}`); })
+      .then(invite => { if (!cancelled) { setJoinUrl(`${window.location.origin}${invite.joinPath}`); setInviteId(invite.id); } })
       .catch(e => { if (!cancelled) setErr(String(e)); });
     refresh();
     const t = setInterval(refresh, ROOM_POLL_MS);
@@ -78,6 +81,11 @@ export function Lobby() {
       <button disabled={!joinUrl} onClick={() => copyText(joinUrl, 'Link copied')}
         className="w-full mb-4 bg-accent-tint text-accent border border-accent/20 py-2 rounded-lg text-xs font-semibold">
         Copy invite link
+      </button>
+      <button disabled={!inviteId} onClick={() => {
+        void revokeHostedInvite(code, hostToken, inviteId).then(() => { setJoinUrl(''); setInviteId(''); });
+      }} className="w-full mb-4 text-[10px] font-semibold text-red-600 hover:underline disabled:opacity-40">
+        Revoke this invite link
       </button>
 
       {template && template.suggestedRoleIds.length > 0 && (
