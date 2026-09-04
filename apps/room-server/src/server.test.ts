@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { Server as HttpServer } from 'node:http';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -32,7 +32,7 @@ function memoryRecords(initial = room()) {
   let current = structuredClone(initial);
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
-    createRoom: vi.fn(), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
+    createRoom: vi.fn(async (value: Room) => { current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
     updateRoom: vi.fn(async (_code: string, version: number, next: Room) => { if (version !== current.version) return false; current = structuredClone(next); return true; }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
@@ -246,6 +246,21 @@ describe('hosted room production entry', () => {
     expect(memory.records.updateRoom).not.toHaveBeenCalled();
   });
 
+  it('browser host creates a signed seat and issues a capability-bearing lobby invite', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const createdResponse = await fetch(`${base}/api/browser-rooms`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'WEB01', topic: 'demo', name: 'David', role: 'host', color: '#123456', initials: 'DH' }) });
+    expect(createdResponse.status).toBe(201);
+    const created = await createdResponse.json() as { token: string; participant: Room['participants'][number] };
+    expect(created.participant.authenticatedIdentity).toMatchObject({ cardName: 'David', scheme: 'oauth2' });
+    const inviteResponse = await fetch(`${base}/api/rooms/WEB01/human-invites`, { method: 'POST', headers: { authorization: `Bearer ${created.token}` } });
+    expect(inviteResponse.status).toBe(201);
+    const invite = await inviteResponse.json() as { token: string; joinPath: string };
+    expect(invite.joinPath).toBe(`/j/WEB01?invite=${encodeURIComponent(invite.token)}`);
+    expect(invite.joinPath).not.toBe('/j/WEB01');
+  });
+
   it('refuses expired and tampered human sessions by name', async () => {
     const memory = memoryRecords(); let now = 1_000;
     const authority = new HumanSessionAuthority(memory.records, 's'.repeat(48), 'hosted-room', () => now);
@@ -266,6 +281,7 @@ describe('hosted room production entry', () => {
     const pkg = JSON.parse(await readFile(new URL('apps/room-server/package.json', root), 'utf8'));
     const entry = await readFile(new URL('apps/room-server/src/server.ts', root), 'utf8');
     const joinScreen = await readFile(new URL('apps/web/src/screens/Join.tsx', root), 'utf8');
+    const lobbyScreen = await readFile(new URL('apps/web/src/screens/Lobby.tsx', root), 'utf8');
     const roomHook = await readFile(new URL('apps/web/src/hooks/useRoom.ts', root), 'utf8');
     const webClient = await readFile(new URL('apps/web/src/room-server-client.ts', root), 'utf8');
     expect(docker).toContain('CMD ["node", "apps/room-server/dist/index.js"]');
@@ -288,9 +304,21 @@ describe('hosted room production entry', () => {
     expect(entry).toContain('RoomRecordServer.fromEnvironment');
     expect(entry).toContain("env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist'");
     expect(joinScreen).toContain('exchangeHumanInvite');
+    expect(lobbyScreen).toContain('issueHostedInvite');
+    expect(lobbyScreen).toContain('invite.joinPath');
+    expect(lobbyScreen).not.toContain('`${window.location.origin}/j/${code}`');
     expect(roomHook).toContain('appendHostedMessage');
     expect(`${joinScreen}\n${roomHook}`).not.toContain('@agent-room/upstash-client');
-    expect(webClient).toContain('VITE_ROOM_SERVER_BASE_URL');
+    expect(webClient).toContain('ENV.roomServerBaseUrl');
+    const webFiles = [
+      ...(await readdir(new URL('apps/web/src/screens', root))).filter(name => name.endsWith('.tsx')).map(name => new URL(`apps/web/src/screens/${name}`, root)),
+      ...(await readdir(new URL('apps/web/src/hooks', root))).filter(name => name.endsWith('.ts')).map(name => new URL(`apps/web/src/hooks/${name}`, root)),
+    ];
+    const directStorageImports = (await Promise.all(webFiles.map(async path => ({ path: path.pathname, source: await readFile(path, 'utf8') })))).filter(file => file.source.includes('@agent-room/upstash-client'));
+    expect(directStorageImports).toStrictEqual([]);
+    const envSource = await readFile(new URL('apps/web/src/env.ts', root), 'utf8');
+    expect(envSource).toContain('VITE_ROOM_SERVER_BASE_URL');
+    expect(envSource).not.toContain('UPSTASH_REDIS_REST_TOKEN');
   });
 
   it('keypair tool separates private and public custody without leaking key bytes', async () => {

@@ -1,12 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Link, useParams, useNavigate } from 'react-router-dom';
-import { createClient, getRoom, joinRoom, verifyHostKey, HostNameTakenError, RoomNotFoundError } from '@agent-room/upstash-client';
 import type { Room } from '@agent-room/shared';
 import { ROOM_POLL_MS } from '@agent-room/shared';
-import { ENV } from '../env.js';
 import { Avatar } from '../components/Avatar.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
-import { colorForName, initialsFor } from '../lib/colors.js';
+import { getHostedRoom, issueHostedInvite } from '../room-server-client.js';
 import { copyText } from '../lib/copy.js';
 import { templateById, roleLabelFor } from '../lib/templates.js';
 
@@ -15,69 +13,28 @@ export function Lobby() {
   const navigate = useNavigate();
   const [room, setRoom] = useState<Room | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [joinUrl, setJoinUrl] = useState('');
 
   useEffect(() => {
-    const client = createClient(ENV.upstash);
     const stored = sessionStorage.getItem(`room:${code}:self`);
-    const self = stored ? JSON.parse(stored) as { name: string; role: string } : null;
+    const self = stored ? JSON.parse(stored) as { name: string; role: string; token: string } : null;
 
     let cancelled = false;
 
-    async function ensureJoined() {
-      try {
-        if (self && !cancelled) {
-          // Pre-flight: if we're claiming the host's display name, prove
-          // we own the host key. Without this, anyone with the code could
-          // pretend to be the host.
-          const room = await getRoom(client, code);
-          if (self.name === room.createdBy) {
-            // Read from localStorage (room-scoped, survives tab close) with
-            // a sessionStorage fallback for hosts who created the room before
-            // we moved the key — keeps their existing tab working.
-            const hostKey = localStorage.getItem(`room:${code}:hostKey`)
-              ?? sessionStorage.getItem(`room:${code}:hostKey`)
-              ?? undefined;
-            await verifyHostKey(client, code, hostKey);
-          }
-          // priorIdentity tells joinRoom this is the same logical session
-          // updating its own row, so a refresh doesn't get auto-suffixed.
-          await joinRoom(client, code, {
-            name: self.name,
-            role: self.role,
-            color: colorForName(self.name),
-            initials: initialsFor(self.name),
-            client: 'web',
-            joinedAt: Date.now(),
-            lastSeenAt: Date.now(),
-          }, {
-            priorIdentity: { name: self.name, client: 'web' },
-          });
-        }
-        await refresh();
-      } catch (e) {
-        if (cancelled) return;
-        if (e instanceof HostNameTakenError) {
-          // Wipe the bogus self entry and bounce to the Join page so they
-          // can pick a different name.
-          sessionStorage.removeItem(`room:${code}:self`);
-          setErr(`The name "${self?.name ?? '?'}" is reserved for the host of this room. Please pick a different name.`);
-          setTimeout(() => navigate(`/j/${code}`, { replace: true }), 1500);
-          return;
-        }
-        setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e));
-      }
-    }
-
     async function refresh() {
       try {
-        const r = await getRoom(client, code);
-        if (!cancelled) setRoom(r);
+        const next = await getHostedRoom(code);
+        if (!cancelled) setRoom(next);
       } catch (e) {
-        if (!cancelled) setErr(e instanceof RoomNotFoundError ? 'Room not found' : String(e));
+        if (cancelled) return;
+        setErr(String(e).includes('room_not_found') ? 'Room not found' : String(e));
       }
     }
-
-    ensureJoined();
+    if (!self?.token) { setErr('Host session required'); return; }
+    issueHostedInvite(code, self.token)
+      .then(invite => { if (!cancelled) setJoinUrl(`${window.location.origin}${invite.joinPath}`); })
+      .catch(e => { if (!cancelled) setErr(String(e)); });
+    refresh();
     const t = setInterval(refresh, ROOM_POLL_MS);
     return () => { cancelled = true; clearInterval(t); };
   }, [code]);
@@ -95,7 +52,6 @@ export function Lobby() {
   if (err) return <>{header}<div className="p-10 text-red-600">{err}</div></>;
   if (!room) return <>{header}<div className="p-10 text-ink-soft">Loading…</div></>;
 
-  const joinUrl = `${window.location.origin}/j/${code}`;
   const inviteText = `Room invite · ${room.topic}\nCode: ${code}\nJoin: ${joinUrl}`;
   const template = templateById(sessionStorage.getItem(`room:pending-template:${code}`));
 
@@ -114,12 +70,12 @@ export function Lobby() {
       </div>
 
       <div className="bg-surface-softer border border-dashed border-border rounded-lg p-3 text-[10px] text-ink-soft leading-relaxed mb-4 relative whitespace-pre-line">
-        <button onClick={() => copyText(inviteText, 'Invite copied')}
+        <button disabled={!joinUrl} onClick={() => copyText(inviteText, 'Invite copied')}
           className="absolute top-2 right-2 bg-surface border border-border px-2 py-0.5 rounded text-[9px] font-semibold text-ink-muted">⎘ Copy</button>
         {inviteText}
       </div>
 
-      <button onClick={() => copyText(joinUrl, 'Link copied')}
+      <button disabled={!joinUrl} onClick={() => copyText(joinUrl, 'Link copied')}
         className="w-full mb-4 bg-accent-tint text-accent border border-accent/20 py-2 rounded-lg text-xs font-semibold">
         Copy invite link
       </button>

@@ -1,8 +1,8 @@
 import { useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
-import { createClient, createRoom } from '@agent-room/upstash-client';
 import { generateCode, ROLE_PRESETS } from '@agent-room/shared';
-import { ENV } from '../env.js';
+import { createHostedBrowserRoom } from '../room-server-client.js';
+import { colorForName, initialsFor } from '../lib/colors.js';
 import { ROOM_TEMPLATES, roleLabelFor, templateById } from '../lib/templates.js';
 import { AgentRoomLogo } from '../components/AgentRoomLogo.js';
 
@@ -40,17 +40,9 @@ export function CreateMeeting() {
     if (!topic.trim() || !name.trim()) return;
     setBusy(true); setError(null);
     try {
-      const client = createClient(ENV.upstash);
       const code = generateCode();
-      const created = await createRoom(client, { code, topic: topic.trim(), createdBy: name.trim() });
-      sessionStorage.setItem(`room:${code}:self`, JSON.stringify({ name: name.trim(), role: role.trim() }));
-      // Stash the host key — required to claim the host's display name on
-      // any future join (refresh, second tab, accidental End → Reactivate
-      // even from a fresh browser session). Lives in localStorage instead
-      // of sessionStorage so it survives tab close — the room itself has
-      // a 24h Redis TTL, so a localStorage entry that outlives a tab but
-      // not the room is the right scope.
-      localStorage.setItem(`room:${code}:hostKey`, created.hostKey);
+      const created = await createHostedBrowserRoom({ code, topic: topic.trim(), name: name.trim(), role: role.trim(), color: colorForName(name.trim()), initials: initialsFor(name.trim()) });
+      sessionStorage.setItem(`room:${code}:self`, JSON.stringify({ name: name.trim(), role: 'human', token: created.token }));
       // Stash the chosen template so Lobby (and the room itself) can post the
       // opening message + show suggested roles. We use sessionStorage and not
       // a route param so re-opens or refreshes don't re-trigger the opener.

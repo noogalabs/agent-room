@@ -2,7 +2,7 @@
 
 ## Existing web call census
 
-Before this change the browser talked directly to `@agent-room/upstash-client`. `Join` called `getRoom`, `verifyHostKey`, and `joinRoom`; `Lobby` called the same three; `CreateMeeting` called `createRoom`; `useRoom` called `getRoom`, `listMessages`, `getMessageTotalCount`, `appendMessage`, and `updatePresence`. `Room` additionally calls the host controls (`appendSystemMessage`, `directInvoke`, turn controls, mute/reply-mode controls, report/end/reactivate/remove), while `Report` reads rooms/messages and creates/reads reports. The human join, room read, message read, and message write path now uses the hosted room-server HTTP API. Existing host-only administrative controls remain on their current client until they receive equivalent authenticated room-server routes.
+Before this change the browser talked directly to `@agent-room/upstash-client`. `Join` called `getRoom`, `verifyHostKey`, and `joinRoom`; `Lobby` called the same three; `CreateMeeting` called `createRoom`; `useRoom` called `getRoom`, `listMessages`, `getMessageTotalCount`, `appendMessage`, and `updatePresence`. `Room` additionally called the host controls (`appendSystemMessage`, `directInvoke`, turn controls, mute/reply-mode controls, report/end/reactivate/remove), while `Report` read rooms/messages and created/read reports. All browser room storage calls now go through `room-server-client`; no screen or hook imports the storage client, and no Redis credential is bundled into Vite. Durable host actions are authenticated room-server routes. The legacy turn queue has an explicit server seam that currently returns no active turn rather than letting the browser bypass persistence.
 
 ## Security and hosting contract
 
@@ -12,12 +12,12 @@ The host creates a short-lived, single-use invite with its server-side bearer cr
 
 ## Five-line walkthrough
 
-1. The host creates a room and asks the server for a human invite link.
-2. Open `/j/<room>?invite=<capability>` in the browser.
+1. David opens New Meeting; room-server creates his signed human host seat.
+2. The lobby issues and copies `/j/<room>?invite=<capability>` through room-server.
 3. Enter a display name and optional job title; the server records the seat as role `human`.
 4. Post a message; it is accepted only with the browser session bound to that exact person and room.
 5. Revoke the invite to invalidate its established session, and use an expired watch link to confirm it remains read-only.
 
 ## Guard-removal kill record
 
-The production-entry test `binds human invite, session, join and post identity while watch tokens stay read-only` is the mutation casualty for the HTTP boundary. Removing the bearer verification makes its unauthenticated-post assertion RED; accepting a signed watch capability makes its `watch_session_expired` assertion RED; removing the message/session name-and-client comparison makes its agent/other-human impersonation assertion RED; removing the durable participant identity check makes its persisted-identity assertion RED; and removing the redeemed/revoked receipt checks makes its reuse and established-session-revocation assertions RED. The focused capability test `refuses expired and tampered human sessions by name` turns RED when signature comparison or session expiry is removed. `refuses a revoked human invite before participant mutation` turns RED when the pre-join revocation lookup is removed. The consumer-census test turns RED if `Join`/`useRoom` return to direct Upstash access or if the image stops building and serving `apps/web`.
+The production-entry test `binds human invite, session, join and post identity while watch tokens stay read-only` is the mutation casualty for the HTTP boundary. Removing the bearer verification makes its unauthenticated-post assertion RED; accepting a signed watch capability makes its `watch_session_expired` assertion RED; removing the message/session name-and-client comparison makes its agent/other-human impersonation assertion RED; removing the durable participant identity check makes its persisted-identity assertion RED; and removing the redeemed/revoked receipt checks makes its reuse and established-session-revocation assertions RED. The focused capability test `refuses expired and tampered human sessions by name` turns RED when signature comparison or session expiry is removed. `refuses a revoked human invite before participant mutation` turns RED when the pre-join revocation lookup is removed. `browser host creates a signed seat and issues a capability-bearing lobby invite` turns RED if the hosted lobby path loses the invite capability. The consumer census enumerates every browser screen and hook; any storage-client import or Vite Redis token turns it RED, as does removing the combined web/server image entry.
