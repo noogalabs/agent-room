@@ -92,7 +92,8 @@ function memoryRecords(initial = room()) {
 }
 
 function hostedEnv(path: string, extra: Record<string, string | undefined> = {}) {
-  return { AGENT_ROOM_TRUST_STORE: path, AGENT_ROOM_HUMAN_SESSION_SECRET: 'h'.repeat(48), AGENT_ROOM_HOST_TOKEN: 'host-test-token', ...extra };
+  return { AGENT_ROOM_TRUST_STORE: path, AGENT_ROOM_HUMAN_SESSION_SECRET: 'h'.repeat(48),
+    AGENT_ROOM_HOST_TOKEN: 'host-test-token', AGENT_ROOM_ADMIN_TOKEN: 'admin-test-token', ...extra };
 }
 
 async function listenHosted(hosted: Awaited<ReturnType<typeof createHostedRoomServer>>) {
@@ -616,18 +617,26 @@ describe('hosted room production entry', () => {
     let response = await fetch(`${firstBase}/api/fleet-trust`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify([added]),
     });
-    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer ', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
     response = await fetch(`${firstBase}/api/fleet-trust`, {
       method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify([added]),
     });
-    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
     const privateKey = { ...added, keyId: 'private-key', publicKey: addedKeys.privateKey.export({ format: 'jwk' }) };
     response = await fetch(`${firstBase}/api/fleet-trust`, {
-      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify([privateKey]),
+      method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' }, body: JSON.stringify([privateKey]),
     });
     expect(await response.json()).toStrictEqual({ error: 'trust_store_key_invalid' });
     response = await fetch(`${firstBase}/api/fleet-trust`, {
-      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+      method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' }, body: JSON.stringify([added]),
     });
     expect(response.status).toBe(201);
     for (const attempt of [
@@ -636,7 +645,7 @@ describe('hosted room production entry', () => {
     ]) {
       response = await fetch(`${firstBase}${attempt.path}`, { method: attempt.method, headers: { authorization: `Bearer ${created.token}` } });
       expect(response.status).toBe(400);
-      expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+      expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
     }
     const card = { protocolVersion: '0.3', fleetId: 'fleet-b', name: 'Agent B', url: 'https://fleet.invalid/b', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
     const participant = { name: 'Agent B', role: '', color: '#000000', initials: 'AB', client: 'cc' as const };
@@ -658,12 +667,35 @@ describe('hosted room production entry', () => {
       expect(await response.json()).toStrictEqual({ error: 'agent_fleet_revoked' });
     }
     await memory.records.putFleetTrustKey(added);
-    response = await fetch(`${firstBase}/api/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
+    response = await fetch(`${firstBase}/api/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: 'Bearer admin-test-token' } });
     expect(response.status).toBe(200);
 
     const restartedBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
     expect(memory.trustKeys().map(key => `${key.fleetId}:${key.keyId}`)).toEqual(['fleet-a:key-a']);
     expect(await (await fetch(`${restartedBase}/health`)).json()).toMatchObject({ trustKeyCount: 1 });
+  });
+
+  it('fails the global trust door closed when its separate admin credential is unset', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path, { AGENT_ROOM_ADMIN_TOKEN: undefined })));
+    const response = await fetch(`${base}/api/fleet-trust`, {
+      method: 'GET', headers: { authorization: 'Bearer host-test-token' },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'admin_auth_required' });
+  });
+
+  it('does not let the fleet-trust admin credential mint rooms', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const response = await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer admin-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'ADMIN1' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
   });
 
   it('refuses unauthenticated browser creation and a signed overwrite of a live room', async () => {

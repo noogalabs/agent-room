@@ -70,6 +70,7 @@ export async function createHostedRoomServer(
   const humans = new HumanSessionAuthority(rooms, humanSecret, env.AGENT_ROOM_HUMAN_ISSUER ?? 'hosted-room');
   const hostToken = env.AGENT_ROOM_HOST_TOKEN;
   if (!hostToken) throw new HumanSessionError('host_token_required');
+  const adminToken = env.AGENT_ROOM_ADMIN_TOKEN;
   const createRoomExclusive = async (room: Room): Promise<void> => {
     try { await rooms.createRoom(room); }
     catch (caught) {
@@ -82,6 +83,13 @@ export async function createHostedRoomServer(
     const token = bearer(req);
     if (!token || token.length !== hostToken.length || !timingSafeEqual(Buffer.from(token), Buffer.from(hostToken))) {
       throw new HumanSessionError('host_auth_required');
+    }
+  };
+  const requireAdmin = (req: IncomingMessage): void => {
+    const token = bearer(req);
+    if (!adminToken || !token || token.length !== adminToken.length ||
+      !timingSafeEqual(Buffer.from(token), Buffer.from(adminToken))) {
+      throw new HumanSessionError('admin_auth_required');
     }
   };
   const authorizeRoomHost = async (req: IncomingMessage, code: string): Promise<void> => {
@@ -265,7 +273,7 @@ export async function createHostedRoomServer(
       }
       const trustMatch = /^\/api\/fleet-trust(?:\/([^/]+)\/([^/]+))?$/.exec(url.pathname);
       if (trustMatch) {
-        requireHost(req);
+        requireAdmin(req);
         if (req.method === 'GET' && !trustMatch[1]) return reply(res, 200, storedTrustKeys);
         if (req.method === 'POST' && !trustMatch[1]) {
           const submitted = validateStoredTrustKeys(await body(req));
