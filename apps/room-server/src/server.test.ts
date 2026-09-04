@@ -411,6 +411,12 @@ describe('hosted room production entry', () => {
       method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' },
       body: JSON.stringify({ action, code: 'ROOM1', cursor: 0 }),
     });
+    const send = await fetch(`${base}/api/room`, {
+      method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'send', code: 'ROOM1', message: { id: 1, type: 'msg', name: card.name, role: '', color: '#000000', initials: 'AA', client: 'cc', text: 'after removal', time: 1 } }),
+    });
+    expect(send.status).toBe(400);
+    expect(await send.json()).toStrictEqual({ error: 'agent_session_revoked' });
     for (const action of ['get', 'messages'] as const) {
       const response = await read(action);
       expect(response.status).toBe(400);
