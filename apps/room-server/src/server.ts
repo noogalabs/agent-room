@@ -6,6 +6,7 @@ import { AgentCardVerifier, AuthenticatedRoomJoinServer, MemberJoinError, RoomRe
 import { extractArtifacts, type Message, type ReplyMode, type ReplyModeConfig, type Room, type RoomReport } from '@agent-room/shared';
 import { loadTrustStore } from './trust-store.js';
 import { HumanSessionAuthority, HumanSessionError } from './human-sessions.js';
+import { canonicalHumanMessage, resolveSessionParticipant } from './human-message-identity.js';
 
 export interface HostedRoomServer { server: Server; rooms: RoomRecordServer; close(): Promise<void> }
 
@@ -93,7 +94,7 @@ export async function createHostedRoomServer(
     const roster = await rooms.listReceipts(code);
     if ((!input.creator && cleanName === room.createdBy) || room.participants.some(item => item.name === cleanName) || roster.some(item => item.payload.memberName === cleanName)) throw new HumanSessionError('human_name_taken');
     const issued = await humans.exchangeInvite(code, input.inviteToken, cleanName, input.role ?? '', input.creator === true);
-    const participant = { name: issued.identity.cardName, role: 'human', color: input.color ?? '#555555', initials: input.initials ?? 'HU', client: 'web' as const, joinedAt: issued.identity.verifiedAt, lastSeenAt: issued.identity.verifiedAt, authenticatedIdentity: issued.identity };
+    const participant = { name: issued.identity.cardName, role: input.creator ? 'host' : 'human', color: input.color ?? '#555555', initials: input.initials ?? 'HU', client: 'web' as const, joinedAt: issued.identity.verifiedAt, lastSeenAt: issued.identity.verifiedAt, authenticatedIdentity: issued.identity };
     const next = { ...room, version: room.version + 1, participants: [...room.participants, participant] };
     if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
     return { ...issued, participant };
@@ -214,8 +215,7 @@ export async function createHostedRoomServer(
         const room = await rooms.getRoom(code); if (!room) throw new HumanSessionError('room_not_found');
         if (input.action === 'system-message' && input.message) {
           const session = await humans.verifySession(bearer(req) ?? '', code);
-          const member = room.participants.find(item => item.client === 'web' && item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
-          if (!member) throw new HumanSessionError('host_auth_required');
+          const member = resolveSessionParticipant(room, session);
           const supplied = input.message;
           const message: Message = { id: supplied.id, type: 'sys', name: member.name, role: member.role, initials: member.initials, color: member.color, client: 'web', text: supplied.text, time: supplied.time, attachments: supplied.attachments };
           return reply(res, 200, { sequence: await rooms.appendMessage(code, message) });
@@ -250,10 +250,8 @@ export async function createHostedRoomServer(
         const session = await humans.verifySession(bearer(req) ?? '', code);
         const supplied = await body(req) as Message;
         const room = await rooms.getRoom(code);
-        const member = room?.participants.find(item => item.client === 'web' && item.name === session.name);
-        if (!member?.authenticatedIdentity || member.authenticatedIdentity.cardName !== session.name) throw new HumanSessionError('human_membership_required');
-        if (supplied.client !== 'web' || supplied.name !== session.name || supplied.type !== 'msg' || supplied.role !== member.role || supplied.initials !== member.initials || supplied.color !== member.color || supplied.metadata !== undefined) throw new HumanSessionError('human_identity_mismatch');
-        const message: Message = { id: supplied.id, type: 'msg', name: member.name, role: member.role, initials: member.initials, color: member.color, client: 'web', text: supplied.text, time: supplied.time, attachments: supplied.attachments };
+        const member = resolveSessionParticipant(room, session);
+        const message = canonicalHumanMessage(member, supplied);
         return reply(res, 201, { sequence: await rooms.appendMessage(code, message) });
       }
       if (req.method === 'GET' && action === 'messages') { await authorizeRead(req, url, code); return reply(res, 200, await rooms.listMessages(code, Number(url.searchParams.get('from') ?? 0))); }
