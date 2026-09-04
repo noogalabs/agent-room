@@ -113,7 +113,9 @@ export class HumanSessionAuthority {
 
   issueAgentSession(roomCode: string, identity: AuthenticatedMemberIdentity, ttlMs = 8 * 60 * 60_000): { token: string; expiresAt: number } {
     const expiresAt = this.now() + ttlMs;
-    return { expiresAt, token: this.sign({ purpose: 'agent', roomCode, id: identity.cardFingerprint, expiresAt, name: identity.cardName, role: 'agent', client: 'cc' }) };
+    return { expiresAt, token: this.sign({ purpose: 'agent', roomCode,
+      id: randomBytes(18).toString('base64url'), identityFingerprint: identity.cardFingerprint,
+      expiresAt, name: identity.cardName, role: 'agent', client: 'cc' }) };
   }
 
   async verifySession(token: string, roomCode: string): Promise<Capability> {
@@ -132,7 +134,7 @@ export class HumanSessionAuthority {
 
   verifyAgentSession(token: string, roomCode: string): Capability {
     const session = this.verify(token, 'agent');
-    if (session.roomCode !== roomCode || !session.name || session.client !== 'cc') throw new HumanSessionError('agent_session_invalid');
+    if (session.roomCode !== roomCode || !session.name || !session.identityFingerprint || session.client !== 'cc') throw new HumanSessionError('agent_session_invalid');
     return session;
   }
 

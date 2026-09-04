@@ -17,9 +17,29 @@ export class RoomRecordServer {
   }
 
   createRoom(room: Room): Promise<void> { return this.persistence.createRoom(room); }
-  getRoom(code: string): Promise<Room | null> { return this.persistence.getRoom(code); }
+  async getRoom(code: string): Promise<Room | null> {
+    const room = await this.persistence.getRoom(code);
+    if (!room) return null;
+    const seen = new Set<string>();
+    const participants = room.participants.filter(participant => {
+      const fingerprint = participant.authenticatedIdentity?.cardFingerprint;
+      if (!fingerprint) return true;
+      if (seen.has(fingerprint)) return false;
+      seen.add(fingerprint);
+      return true;
+    });
+    return participants.length === room.participants.length ? room : { ...room, participants };
+  }
   updateRoom(code: string, expectedVersion: number, next: Room): Promise<boolean> {
     return this.persistence.compareAndSwapRoom(code, expectedVersion, next);
+  }
+  updateRoomAndDeleteReceipt(code: string, expectedVersion: number, next: Room, receiptId: string): Promise<boolean> {
+    return this.persistence.compareAndSwapRoomAndDeleteReceipt(code, expectedVersion, next, receiptId);
+  }
+  updateRoomAndReplaceReceipt(
+    code: string, expectedVersion: number, next: Room, receipt: RoomReceipt, deleteReceiptId?: string,
+  ): Promise<boolean> {
+    return this.persistence.compareAndSwapRoomAndReplaceReceipt(code, expectedVersion, next, receipt, deleteReceiptId);
   }
   appendMessage(code: string, message: Message): Promise<number> {
     return this.persistence.appendMessage(code, message);
@@ -50,6 +70,9 @@ export class RoomRecordServer {
   }
   appendReceipt(receipt: RoomReceipt): Promise<boolean> {
     return this.persistence.appendReceipt(receipt);
+  }
+  deleteReceipt(code: string, receiptId: string): Promise<boolean> {
+    return this.persistence.deleteReceipt(code, receiptId);
   }
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean> {
     return this.persistence.appendLeaseEvent(event);

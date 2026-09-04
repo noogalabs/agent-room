@@ -181,6 +181,43 @@ describePostgres('Postgres durable room production entry', () => {
     }
   });
 
+  it('rolls back the room update and exact legacy cleanup when the v2 receipt leg fails', async () => {
+    vi.useRealTimers();
+    const server = await RoomRecordServer.fromEnvironment({
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: databaseUrl,
+    });
+    const code = `PGS-JOIN-RB-${process.pid}`;
+    const before: Room = { ...room(), code, version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
+    const legacy: RoomReceipt = { id: 'member-roster:legacy-own', roomCode: code, kind: 'receipt',
+      createdAt: 1_700_000_000_600, payload: { memberName: 'Agent Own', memberClient: 'cc' } };
+    const unrelated: RoomReceipt = { id: 'human-invite:unrelated:revoked', roomCode: code, kind: 'receipt',
+      createdAt: 1_700_000_000_601, payload: { event: 'human_invite_revoked', inviteId: 'unrelated' } };
+    const v2: RoomReceipt = { id: 'member-roster:v2-own', roomCode: code, kind: 'receipt',
+      createdAt: 1_700_000_000_602, payload: { memberName: 'Agent Own', memberClient: 'cc', fingerprintVersion: 2 } };
+    const next: Room = { ...before, version: 2, participants: [{ name: 'Agent Own', initials: 'AO',
+      color: '#456', role: 'builder', client: 'cc', joinedAt: 1_700_000_000_602 }] };
+    await server.createRoom(before);
+    expect(await server.appendReceipt(legacy)).toBe(true);
+    expect(await server.appendReceipt(unrelated)).toBe(true);
+    await admin.query(`CREATE OR REPLACE FUNCTION pg_temp.reject_v2_roster_receipt() RETURNS trigger AS $$
+      BEGIN
+        IF NEW.receipt_id = 'member-roster:v2-own' THEN RAISE EXCEPTION 'synthetic receipt-leg failure'; END IF;
+        RETURN NEW;
+      END $$ LANGUAGE plpgsql`);
+    await admin.query(`CREATE TRIGGER reject_v2_roster_receipt BEFORE INSERT ON agent_room_receipts
+      FOR EACH ROW EXECUTE FUNCTION pg_temp.reject_v2_roster_receipt()`);
+    try {
+      await expect(server.persistence.compareAndSwapRoomAndReplaceReceipt(
+        code, before.version, next, v2, legacy.id,
+      )).rejects.toThrow('synthetic receipt-leg failure');
+      expect(await server.getRoom(code)).toStrictEqual(before);
+      expect(await server.listReceipts(code)).toStrictEqual([legacy, unrelated]);
+    } finally {
+      await admin.query('DROP TRIGGER reject_v2_roster_receipt ON agent_room_receipts');
+      await server.close();
+    }
+  });
+
   it('atomically persists a task lease and its ledger event across restart', async () => {
     vi.useRealTimers();
     const server = await RoomRecordServer.fromEnvironment({

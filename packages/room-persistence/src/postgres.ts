@@ -99,6 +99,78 @@ export class PostgresRoomPersistence implements RoomPersistence {
     return count(result) === 1;
   }
 
+  async compareAndSwapRoomAndDeleteReceipt(
+    code: string, expectedVersion: number, next: Room, receiptId: string,
+  ): Promise<boolean> {
+    return this.transaction(async client => {
+      const room = await client.query<{ version: number }>(
+        'SELECT version FROM agent_room_rooms WHERE code = $1 FOR UPDATE', [code],
+      );
+      if (Number(room.rows[0]?.version) !== expectedVersion) return false;
+      const receipt = await client.query(
+        'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
+        [code, receiptId],
+      );
+      if (count(receipt) !== 1) return false;
+      const updated = await client.query(
+        `UPDATE agent_room_rooms
+            SET topic = $3, status = $4, version = $5, room_json = $6::jsonb, updated_at = $7
+          WHERE code = $1 AND version = $2`,
+        [code, expectedVersion, next.topic, next.status, next.version, JSON.stringify(next), Date.now()],
+      );
+      if (count(updated) !== 1) throw new Error('Atomic participant removal lost its room update');
+      const deleted = await client.query(
+        'DELETE FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2', [code, receiptId],
+      );
+      if (count(deleted) !== 1) throw new Error('Atomic participant removal lost its roster receipt');
+      return true;
+    });
+  }
+
+  async compareAndSwapRoomAndReplaceReceipt(
+    code: string, expectedVersion: number, next: Room, receipt: RoomReceipt, deleteReceiptId?: string,
+  ): Promise<boolean> {
+    return this.transaction(async client => {
+      const room = await client.query<{ version: number }>(
+        'SELECT version FROM agent_room_rooms WHERE code = $1 FOR UPDATE', [code],
+      );
+      if (Number(room.rows[0]?.version) !== expectedVersion) return false;
+      if (deleteReceiptId) {
+        const legacy = await client.query(
+          'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
+          [code, deleteReceiptId],
+        );
+        if (count(legacy) !== 1) return false;
+      }
+      const collision = await client.query(
+        'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
+        [code, receipt.id],
+      );
+      if (count(collision) !== 0) return false;
+      const updated = await client.query(
+        `UPDATE agent_room_rooms
+            SET topic = $3, status = $4, version = $5, room_json = $6::jsonb, updated_at = $7
+          WHERE code = $1 AND version = $2`,
+        [code, expectedVersion, next.topic, next.status, next.version, JSON.stringify(next), Date.now()],
+      );
+      if (count(updated) !== 1) throw new Error('Atomic participant join lost its room update');
+      if (deleteReceiptId) {
+        const deleted = await client.query(
+          'DELETE FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2', [code, deleteReceiptId],
+        );
+        if (count(deleted) !== 1) throw new Error('Atomic participant join lost its legacy roster receipt');
+      }
+      const inserted = await client.query(
+        `INSERT INTO agent_room_receipts
+          (room_code, receipt_id, receipt_kind, lease_event, receipt_json, created_at)
+         VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+        [code, receipt.id, receipt.kind, receipt.leaseEvent ?? null, JSON.stringify(receipt), receipt.createdAt],
+      );
+      if (count(inserted) !== 1) throw new Error('Atomic participant join lost its roster receipt');
+      return true;
+    });
+  }
+
   async appendMessage(code: string, message: Message): Promise<number> {
     return this.transaction(async client => {
       const room = await client.query('SELECT code FROM agent_room_rooms WHERE code = $1 FOR UPDATE', [code]);
@@ -273,6 +345,14 @@ export class PostgresRoomPersistence implements RoomPersistence {
       throw new Error(`Receipt id collision: ${receipt.id}`);
     }
     return false;
+  }
+
+  async deleteReceipt(code: string, receiptId: string): Promise<boolean> {
+    const result = await this.pool.query(
+      'DELETE FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2',
+      [code, receiptId],
+    );
+    return count(result) === 1;
   }
 
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean> {

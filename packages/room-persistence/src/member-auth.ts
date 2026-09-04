@@ -121,7 +121,10 @@ export class AgentCardVerifier {
     this.trustKeys = [...trustKeys];
   }
 
-  verify(signed: SignedAgentCard, scheme: MemberAuthScheme): AuthenticatedMemberIdentity {
+  verifyWithLegacyFingerprint(signed: SignedAgentCard, scheme: MemberAuthScheme): {
+    identity: AuthenticatedMemberIdentity;
+    legacyFingerprint: string;
+  } {
     const selectedScheme = requireMemberAuthScheme(scheme, 'selected_verification_scheme');
     for (const declared of signed.card.security as unknown[]) requireMemberAuthScheme(declared, 'card_declaration');
     for (const declared of Object.keys(signed.card.securitySchemes)) requireMemberAuthScheme(declared, 'card_declaration');
@@ -152,16 +155,23 @@ export class AgentCardVerifier {
       ? key.publicKey as KeyObject
       : createPublicKey(key.publicKey);
     const publicDer = publicObject.export({ type: 'spki', format: 'der' });
-    const fingerprint = createHash('sha256')
+    const legacyFingerprint = createHash('sha256')
       .update(signed.card.fleetId).update('\0').update(publicDer).digest('hex');
-    return {
+    const fingerprint = createHash('sha256')
+      .update(signed.card.fleetId).update('\0').update(publicDer)
+      .update('\0').update(signed.card.name).digest('hex');
+    return { legacyFingerprint, identity: {
       cardFingerprint: fingerprint,
       fleetId: signed.card.fleetId,
       cardName: signed.card.name,
       scheme: selectedScheme,
       keyId: key.keyId,
       verifiedAt: this.now(),
-    };
+    } };
+  }
+
+  verify(signed: SignedAgentCard, scheme: MemberAuthScheme): AuthenticatedMemberIdentity {
+    return this.verifyWithLegacyFingerprint(signed, scheme).identity;
   }
 }
 
@@ -174,18 +184,19 @@ export class AuthenticatedRoomJoinServer {
   ) {}
 
   async join(code: string, input: AuthenticatedJoinInput): Promise<Participant> {
-    const room = await this.rooms.getRoom(code);
+    let room = await this.rooms.getRoom(code);
     if (!room || room.status !== 'active') throw new MemberJoinError('room_not_found', 'Room is not active.');
     const acceptedSchemes = (room.acceptedMemberAuthSchemes ?? [])
       .map(value => requireMemberAuthScheme(value, 'room_configuration'));
     let identity: AuthenticatedMemberIdentity | undefined;
+    let legacyFingerprint: string | undefined;
     if (!input.signedCard || !input.scheme) {
       if (this.mode === 'required') {
         throw new MemberJoinError('agent_card_required', 'This room requires a signed Agent Card.');
       }
     } else {
       const selectedScheme = requireMemberAuthScheme(input.scheme, 'selected_join_scheme');
-      identity = this.verifier.verify(input.signedCard, selectedScheme);
+      ({ identity, legacyFingerprint } = this.verifier.verifyWithLegacyFingerprint(input.signedCard, selectedScheme));
       if (!acceptedSchemes.includes(selectedScheme)) {
         throw new MemberJoinError('agent_card_scheme_not_accepted', 'Room does not accept the selected Agent Card scheme.');
       }
@@ -193,11 +204,60 @@ export class AuthenticatedRoomJoinServer {
         throw new MemberJoinError('agent_card_identity_mismatch', 'Participant name does not match the verified Agent Card.');
       }
     }
+    let legacyReceiptId: string | undefined;
+    let legacyRows: Participant[] = [];
+    if (identity) {
+      legacyReceiptId = `member-roster:${legacyFingerprint}`;
+      legacyRows = room.participants.filter(item => {
+        const prior = item.authenticatedIdentity;
+        if (!prior) return false;
+        return prior.cardFingerprint === legacyFingerprint &&
+          prior.cardName === identity!.cardName && prior.fleetId === identity!.fleetId &&
+          prior.keyId === identity!.keyId;
+      });
+      const hasLegacyReceipt = (await this.rooms.listReceipts(code)).some(receipt => receipt.id === legacyReceiptId);
+      // The v1 id identified a whole fleet key, not one card name. Delete it
+      // only when this verified card also owns a matching legacy participant
+      // row; otherwise a same-key agent could consume another agent's receipt.
+      if (!hasLegacyReceipt || legacyRows.length === 0) legacyReceiptId = undefined;
+      const matches = room.participants.filter(item =>
+        item.authenticatedIdentity?.cardFingerprint === identity.cardFingerprint);
+      if (matches.length > 0) {
+        const existing = matches[0]!;
+        // Historical versions could append the same fleet identity more than
+        // once. A repeat join is also the safe opportunity to collapse those
+        // rows without changing the surviving seat identity.
+        if (matches.length > 1) {
+          const participants = room.participants.filter(item =>
+            item.authenticatedIdentity?.cardFingerprint !== identity!.cardFingerprint || item === existing);
+          const next = { ...room, version: room.version + 1, participants };
+          if (!await this.rooms.updateRoom(code, room.version, next)) {
+            throw new MemberJoinError('room_version_conflict', 'Room changed while the participant was rejoining.');
+          }
+        }
+        return existing;
+      }
+    }
     const at = this.now();
     const participant: Participant = { ...input.participant, joinedAt: at, lastSeenAt: at,
       ...(identity ? { authenticatedIdentity: identity } : {}) };
-    const next: Room = { ...room, version: room.version + 1, participants: [...room.participants, participant] };
-    if (!await this.rooms.updateRoom(code, room.version, next)) {
+    const retained = legacyRows.length === 0 ? room.participants : room.participants.filter(item => !legacyRows.includes(item));
+    const next: Room = { ...room, version: room.version + 1, participants: [...retained, participant] };
+    const updated = identity
+      ? await this.rooms.updateRoomAndReplaceReceipt(code, room.version, next, {
+        id: `member-roster:${identity.cardFingerprint}`,
+        roomCode: code,
+        kind: 'receipt',
+        createdAt: participant.joinedAt,
+        payload: { memberName: participant.name, memberClient: participant.client, fingerprintVersion: 2 },
+      }, legacyReceiptId)
+      : await this.rooms.updateRoom(code, room.version, next);
+    if (!updated) {
+      if (identity) {
+        const winner = (await this.rooms.getRoom(code))?.participants.find(item =>
+          item.authenticatedIdentity?.cardFingerprint === identity!.cardFingerprint);
+        if (winner) return winner;
+      }
       throw new MemberJoinError('room_version_conflict', 'Room changed while the participant was joining.');
     }
     return participant;

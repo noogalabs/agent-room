@@ -43,6 +43,19 @@ export interface RoomPersistence {
   createRoom(room: Room): Promise<void>;
   getRoom(code: string): Promise<Room | null>;
   compareAndSwapRoom(code: string, expectedVersion: number, next: Room): Promise<boolean>;
+  compareAndSwapRoomAndDeleteReceipt(
+    code: string,
+    expectedVersion: number,
+    next: Room,
+    receiptId: string,
+  ): Promise<boolean>;
+  compareAndSwapRoomAndReplaceReceipt(
+    code: string,
+    expectedVersion: number,
+    next: Room,
+    receipt: RoomReceipt,
+    deleteReceiptId?: string,
+  ): Promise<boolean>;
 
   appendMessage(code: string, message: Message): Promise<number>;
   listMessages(code: string, fromSequence: number): Promise<Message[]>;
@@ -65,6 +78,7 @@ export interface RoomPersistence {
   getMinutes(code: string, reportId: string): Promise<RoomReport | null>;
 
   appendReceipt(receipt: RoomReceipt): Promise<boolean>;
+  deleteReceipt(code: string, receiptId: string): Promise<boolean>;
   appendLeaseEvent(event: LeaseEventInput): Promise<boolean>;
   listReceipts(code: string): Promise<RoomReceipt[]>;
 

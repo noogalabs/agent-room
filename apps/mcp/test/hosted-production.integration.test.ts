@@ -23,6 +23,15 @@ function records() {
     createRoom: vi.fn(async (room: Room) => { rooms.set(room.code, structuredClone(room)); }),
     getRoom: vi.fn(async (code: string) => structuredClone(rooms.get(code) ?? null)),
     updateRoom: vi.fn(async (code: string, version: number, room: Room) => { if (rooms.get(code)?.version !== version) return false; rooms.set(code, structuredClone(room)); return true; }),
+    updateRoomAndReplaceReceipt: vi.fn(async (code: string, version: number, room: Room, receipt: any, deleteId?: string) => {
+      if (rooms.get(code)?.version !== version || receipts.some(item => item.id === receipt.id && item.roomCode === code)) return false;
+      const deleteIndex = deleteId ? receipts.findIndex(item => item.id === deleteId && item.roomCode === code) : -1;
+      if (deleteId && deleteIndex < 0) return false;
+      rooms.set(code, structuredClone(room));
+      if (deleteIndex >= 0) receipts.splice(deleteIndex, 1);
+      receipts.push(structuredClone(receipt));
+      return true;
+    }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: any) => { if (receipts.some(item => item.id === value.id && item.roomCode === value.roomCode)) return false; receipts.push(value); return true; }),
     listReceipts: vi.fn(async (code: string) => receipts.filter(item => item.roomCode === code)),
