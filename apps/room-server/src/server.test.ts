@@ -30,10 +30,19 @@ function room(): Room {
 
 function memoryRecords(initial = room()) {
   let current = structuredClone(initial);
+  let refuseAtomicRemoval = false;
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
     createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
     updateRoom: vi.fn(async (_code: string, version: number, next: Room) => { if (version !== current.version) return false; current = structuredClone(next); return true; }),
+    updateRoomAndDeleteReceipt: vi.fn(async (_code: string, version: number, next: Room, id: string) => {
+      if (refuseAtomicRemoval || version !== current.version) return false;
+      const index = receipts.findIndex(item => item.id === id);
+      if (index < 0) return false;
+      current = structuredClone(next);
+      receipts.splice(index, 1);
+      return true;
+    }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
     deleteReceipt: vi.fn(async (_code: string, id: string) => {
@@ -44,7 +53,7 @@ function memoryRecords(initial = room()) {
     }),
     listReceipts: vi.fn(async () => structuredClone(receipts)),
   } as unknown as RoomRecordServer;
-  return { records, current: () => current };
+  return { records, current: () => current, receipts: () => structuredClone(receipts), refuseAtomicRemoval: () => { refuseAtomicRemoval = true; } };
 }
 
 function hostedEnv(path: string, extra: Record<string, string | undefined> = {}) {
@@ -464,6 +473,47 @@ describe('hosted room production entry', () => {
     expect(watch.expiresAt).toBeGreaterThan(Date.now());
     const response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${watch.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 1, type: 'msg', name: 'Sam', role: 'human', initials: 'SA', color: '#000', client: 'web', text: 'hello', time: 1 }) });
     expect(await response.json()).toStrictEqual({ error: 'watch_session_read_only' });
+  });
+
+  it('refuses participant removal without partially changing the room when atomic roster-receipt deletion fails', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: 'Agent A', role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
+    const joined = await (await fetch(`${base}/api/rooms/ROOM1/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+    })).json() as typeof participant & { participantToken: string; authenticatedIdentity: { cardFingerprint: string } };
+    const receiptId = `member-roster:${joined.authenticatedIdentity.cardFingerprint}`;
+    expect(memory.receipts().map(item => item.id)).toContain(receiptId);
+    memory.refuseAtomicRemoval();
+
+    const response = await fetch(`${base}/api/room`, {
+      method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'removeParticipant', code: 'ROOM1', requesterName: 'Agent A', targetName: 'Agent A', targetClient: 'cc' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current().participants.map(item => item.name)).toEqual(['Agent A']);
+    expect(memory.receipts().map(item => item.id)).toContain(receiptId);
+  });
+
+  it('replaces old-scheme roster receipts with versioned per-agent receipts on the first authenticated join', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    await memory.records.appendReceipt({ id: `member-roster:${'a'.repeat(64)}`, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1, payload: { memberName: 'Legacy Agent', memberClient: 'cc' } });
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const card = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const participant = { name: 'Agent A', role: '', color: '#000000', initials: 'AA', client: 'cc' as const };
+    expect((await fetch(`${base}/api/rooms/ROOM1/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+    })).status).toBe(200);
+    const roster = memory.receipts().filter(item => item.id.startsWith('member-roster:'));
+    expect(roster).toHaveLength(1);
+    expect(roster[0]?.id).not.toBe(`member-roster:${'a'.repeat(64)}`);
+    expect(roster[0]?.payload.fingerprintVersion).toBe(2);
   });
 
   it('refuses expired and tampered human sessions by name', async () => {

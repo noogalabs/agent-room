@@ -21,6 +21,24 @@ const ROOM_CAS_SCRIPT = [
   'return 1',
 ].join('\n');
 
+const ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT = [
+  "local raw = redis.call('GET', KEYS[1])",
+  'if not raw then return 0 end',
+  'local current = cjson.decode(raw)',
+  'if tonumber(current.version) ~= tonumber(ARGV[1]) then return 0 end',
+  "local rows = redis.call('LRANGE', KEYS[2], 0, -1)",
+  'local receipt_row = nil',
+  'for _, row in ipairs(rows) do',
+  '  local decoded = cjson.decode(row)',
+  '  if decoded.id == ARGV[3] then receipt_row = row break end',
+  'end',
+  'if not receipt_row then return 0 end',
+  "redis.call('SET', KEYS[1], ARGV[2], 'KEEPTTL')",
+  "redis.call('LREM', KEYS[2], 1, receipt_row)",
+  "redis.call('SREM', KEYS[3], ARGV[3])",
+  'return 1',
+].join('\n');
+
 const BOARD_CAS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   "if ARGV[1] == 'absent' then",
@@ -125,6 +143,16 @@ export class RedisRoomPersistence implements RoomPersistence {
   async compareAndSwapRoom(code: string, expectedVersion: number, next: Room): Promise<boolean> {
     const result = await this.client.command<number>([
       'EVAL', ROOM_CAS_SCRIPT, '1', roomKey(code), String(expectedVersion), JSON.stringify(next),
+    ]);
+    return Number(result) === 1;
+  }
+
+  async compareAndSwapRoomAndDeleteReceipt(
+    code: string, expectedVersion: number, next: Room, receiptId: string,
+  ): Promise<boolean> {
+    const result = await this.client.command<number>([
+      'EVAL', ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT, '3', roomKey(code), receiptsKey(code), receiptIdsKey(code),
+      String(expectedVersion), JSON.stringify(next), receiptId,
     ]);
     return Number(result) === 1;
   }

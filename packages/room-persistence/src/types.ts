@@ -43,6 +43,12 @@ export interface RoomPersistence {
   createRoom(room: Room): Promise<void>;
   getRoom(code: string): Promise<Room | null>;
   compareAndSwapRoom(code: string, expectedVersion: number, next: Room): Promise<boolean>;
+  compareAndSwapRoomAndDeleteReceipt(
+    code: string,
+    expectedVersion: number,
+    next: Room,
+    receiptId: string,
+  ): Promise<boolean>;
 
   appendMessage(code: string, message: Message): Promise<number>;
   listMessages(code: string, fromSequence: number): Promise<Message[]>;
