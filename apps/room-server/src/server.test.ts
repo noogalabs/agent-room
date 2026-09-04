@@ -612,27 +612,49 @@ describe('hosted room production entry', () => {
     })).json() as { token: string };
     const addedKeys = generateKeyPairSync('ed25519');
     const added = { fleetId: 'fleet-b', keyId: 'key-b', publicKey: addedKeys.publicKey.export({ format: 'jwk' }) };
-    let response = await fetch(`${firstBase}/api/rooms/TRUST1/fleet-trust`, {
+    let response = await fetch(`${firstBase}/api/fleet-trust`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify([added]),
     });
-    expect(await response.json()).toStrictEqual({ error: 'human_session_invalid' });
-    const privateKey = { ...added, keyId: 'private-key', publicKey: addedKeys.privateKey.export({ format: 'jwk' }) };
-    response = await fetch(`${firstBase}/api/rooms/TRUST1/fleet-trust`, {
-      method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify([privateKey]),
-    });
-    expect(await response.json()).toStrictEqual({ error: 'trust_store_key_invalid' });
-    response = await fetch(`${firstBase}/api/rooms/TRUST1/fleet-trust`, {
+    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
       method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify([added]),
     });
+    expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+    const privateKey = { ...added, keyId: 'private-key', publicKey: addedKeys.privateKey.export({ format: 'jwk' }) };
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify([privateKey]),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'trust_store_key_invalid' });
+    response = await fetch(`${firstBase}/api/fleet-trust`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify([added]),
+    });
     expect(response.status).toBe(201);
+    for (const attempt of [
+      { method: 'GET', path: '/api/fleet-trust' },
+      { method: 'DELETE', path: '/api/fleet-trust/fleet-b/key-b' },
+    ]) {
+      response = await fetch(`${firstBase}${attempt.path}`, { method: attempt.method, headers: { authorization: `Bearer ${created.token}` } });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toStrictEqual({ error: 'host_auth_required' });
+    }
     const card = { protocolVersion: '0.3', fleetId: 'fleet-b', name: 'Agent B', url: 'https://fleet.invalid/b', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
     const participant = { name: 'Agent B', role: '', color: '#000000', initials: 'AB', client: 'cc' as const };
     response = await fetch(`${firstBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
     expect(response.status).toBe(200);
-    response = await fetch(`${firstBase}/api/rooms/TRUST1/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: `Bearer ${created.token}` } });
+    const seated = await response.json() as { participantToken: string };
+    response = await fetch(`${firstBase}/api/fleet-trust/fleet-b/key-b`, { method: 'DELETE', headers: { authorization: 'Bearer host-test-token' } });
     expect(response.status).toBe(200);
     response = await fetch(`${firstBase}/api/rooms/TRUST1/join`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ participant, signedCard: signAgentCard(card, 'key-b', addedKeys.privateKey), scheme: 'oauth2' }) });
     expect(await response.json()).toStrictEqual({ error: 'agent_card_signature_invalid' });
+    for (const action of ['get', 'messages', 'send'] as const) {
+      response = await fetch(`${firstBase}/api/room`, {
+        method: 'POST', headers: { authorization: `Bearer ${seated.participantToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ action, code: 'TRUST1', cursor: 0,
+          message: { id: 1, type: 'msg', name: card.name, role: '', color: '#000000', initials: 'AB', client: 'cc', text: 'after revoke', time: 1 } }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toStrictEqual({ error: 'agent_fleet_revoked' });
+    }
 
     const restartedBase = await listenHosted(await createHostedRoomServer(hostedEnv(seed.path)));
     expect(memory.trustKeys().map(key => `${key.fleetId}:${key.keyId}`)).toEqual(['fleet-a:key-a']);

@@ -71,16 +71,16 @@ export function revokeHostedInvite(code: string, token: string, inviteId: string
 }
 
 export interface HostedFleetTrustKey { fleetId: string; keyId: string; publicKey: Record<string, unknown> }
-export function listHostedFleetTrust(code: string, token: string) {
-  return request<HostedFleetTrustKey[]>(`/api/rooms/${encodeURIComponent(code)}/fleet-trust`, { headers: readHeaders(token) });
+export function listHostedFleetTrust(token: string) {
+  return request<HostedFleetTrustKey[]>('/api/fleet-trust', { headers: readHeaders(token) });
 }
-export function addHostedFleetTrust(code: string, token: string, key: HostedFleetTrustKey) {
-  return request<HostedFleetTrustKey>(`/api/rooms/${encodeURIComponent(code)}/fleet-trust`, {
+export function addHostedFleetTrust(token: string, key: HostedFleetTrustKey) {
+  return request<HostedFleetTrustKey>('/api/fleet-trust', {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify([key]),
   });
 }
-export function revokeHostedFleetTrust(code: string, token: string, fleetId: string, keyId: string) {
-  return request<{ removed: boolean }>(`/api/rooms/${encodeURIComponent(code)}/fleet-trust/${encodeURIComponent(fleetId)}/${encodeURIComponent(keyId)}`, {
+export function revokeHostedFleetTrust(token: string, fleetId: string, keyId: string) {
+  return request<{ removed: boolean }>(`/api/fleet-trust/${encodeURIComponent(fleetId)}/${encodeURIComponent(keyId)}`, {
     method: 'DELETE', headers: { authorization: `Bearer ${token}` },
   });
 }

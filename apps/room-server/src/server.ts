@@ -262,20 +262,19 @@ export async function createHostedRoomServer(
         const ttlMs = Number.isSafeInteger(requestedTtl) && requestedTtl > 0 && requestedTtl <= 15 * 60_000 ? requestedTtl : 15 * 60_000;
         return reply(res, 201, await humans.issueWatch(decodeURIComponent(watchMatch[1]!), ttlMs));
       }
-      const trustMatch = /^\/api\/rooms\/([^/]+)\/fleet-trust(?:\/([^/]+)\/([^/]+))?$/.exec(url.pathname);
+      const trustMatch = /^\/api\/fleet-trust(?:\/([^/]+)\/([^/]+))?$/.exec(url.pathname);
       if (trustMatch) {
-        const code = decodeURIComponent(trustMatch[1]!);
-        await authorizeRoomHost(req, code);
-        if (req.method === 'GET' && !trustMatch[2]) return reply(res, 200, storedTrustKeys);
-        if (req.method === 'POST' && !trustMatch[2]) {
+        requireHost(req);
+        if (req.method === 'GET' && !trustMatch[1]) return reply(res, 200, storedTrustKeys);
+        if (req.method === 'POST' && !trustMatch[1]) {
           const submitted = validateStoredTrustKeys(await body(req));
           if (submitted.length !== 1) throw new TrustStoreError('trust_store_entry_invalid', 'Submit exactly one fleet trust key.');
           const [key] = submitted;
           await rooms.putFleetTrustKey(key!); await refreshTrustKeys();
           return reply(res, 201, key);
         }
-        if (req.method === 'DELETE' && trustMatch[2] && trustMatch[3]) {
-          const removed = await rooms.deleteFleetTrustKey(decodeURIComponent(trustMatch[2]), decodeURIComponent(trustMatch[3]));
+        if (req.method === 'DELETE' && trustMatch[1] && trustMatch[2]) {
+          const removed = await rooms.deleteFleetTrustKey(decodeURIComponent(trustMatch[1]), decodeURIComponent(trustMatch[2]));
           await refreshTrustKeys();
           return reply(res, 200, { removed });
         }
