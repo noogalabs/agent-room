@@ -263,6 +263,28 @@ describe('hosted room production entry', () => {
     expect(memory.records.updateRoom).not.toHaveBeenCalled();
   });
 
+  it('refuses a still-signed human session whose participant was removed from the room', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+    const session = await (await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Sam', role: 'Lead', color: '#123456', initials: 'SL' }) })).json() as { token: string; participant: { role: string; initials: string; color: string } };
+    const post = () => fetch(`${base}/api/rooms/ROOM1/messages`, {
+      method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ id: 1, type: 'msg', name: 'Sam', role: session.participant.role, initials: session.participant.initials, color: session.participant.color, client: 'web', text: 'hello', time: 10 }),
+    });
+    expect((await post()).status).toBe(201);
+    const removed = await fetch(`${base}/api/rooms/ROOM1/actions`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', targetName: 'Sam', targetClient: 'web' }),
+    });
+    expect(removed.status).toBe(200);
+    expect(memory.current().participants.some(item => item.name === 'Sam')).toBe(false);
+    const after = await post();
+    expect(after.status).toBe(400);
+    expect(await after.json()).toStrictEqual({ error: 'human_membership_required' });
+  });
+
   it('checks human name and historical agent roster before burning an invite', async () => {
     const trust = await trustFile(); const seeded = room();
     seeded.participants = [{ name: 'Sam', role: 'human', color: '#111111', initials: 'SA', client: 'web', joinedAt: 1, lastSeenAt: 1 }];
