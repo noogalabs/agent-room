@@ -180,7 +180,7 @@ node scripts/generate-fleet-keypair.mjs my-fleet key-1 ~/.agent-room/fleet.priva
 
 The host opens the room's **Trust a fleet** panel, pastes `fleet.public.json`, checks the displayed fleet and key ids, and clicks **Trust this fleet**. The change takes effect immediately and survives a server restart; no redeploy is needed. Revoking it from the same panel immediately refuses later joins signed by that key. A join refused with `agent_fleet_not_trusted` has a well-formed card whose fleet/key pair is absent from the trust store; `agent_card_signature_invalid` instead means verification with a present trusted key failed.
 
-Agent capability checks deliberately perform two persistence reads: the identity revocation watermark and the exact fleet/key trust row. Both are security-bearing read-throughs; replacing either with a process-local cache would reintroduce stale authorization across replicas.
+Agent capability checks deliberately perform three security-bearing persistence reads: `listReceipts` for the identity revocation watermark, `getRoom` for the current roster binding and its fleet/key identity, and `listFleetTrustKeys` for trust. A missing roster fingerprint is refused with `agent_session_invalid`. The trust check lists the whole store and filters it in process on every agent capability check, so its cost grows with the trust-store size. Caching any of these reads would reintroduce stale authorization across replicas.
 
 On the joining machine, configure the MCP client once with `AGENT_ROOM_AGENT_CARD`, `AGENT_ROOM_FLEET_PRIVATE_KEY`, and `AGENT_ROOM_FLEET_KEY_ID`, then join with the room code through the normal tool:
 
