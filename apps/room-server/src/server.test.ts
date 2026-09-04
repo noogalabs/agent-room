@@ -252,6 +252,20 @@ describe('hosted room production entry', () => {
     expect(await reuse.json()).toStrictEqual({ error: 'human_invite_revoked' });
   });
 
+  it('refuses to mint a browser creator capability without the host credential', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const unauthenticated = await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ROOM1' }) });
+    expect(unauthenticated.status).toBe(400);
+    expect(await unauthenticated.json()).toStrictEqual({ error: 'host_auth_required' });
+    const wrongToken = await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { authorization: 'Bearer not-the-host-token', 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ROOM1' }) });
+    expect(await wrongToken.json()).toStrictEqual({ error: 'host_auth_required' });
+    const authorized = await fetch(`${base}/api/browser-creator-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' }, body: JSON.stringify({ code: 'ROOM1' }) });
+    expect(authorized.status).toBe(201);
+    expect(await authorized.json()).toMatchObject({ token: expect.any(String) });
+  });
+
   it('refuses a revoked human invite before participant mutation', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
