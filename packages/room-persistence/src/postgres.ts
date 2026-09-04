@@ -130,23 +130,34 @@ export class PostgresRoomPersistence implements RoomPersistence {
   async compareAndSwapRoomAndReplaceReceipt(
     code: string, expectedVersion: number, next: Room, receipt: RoomReceipt, deleteReceiptId?: string,
   ): Promise<boolean> {
+    return this.compareAndSwapRoomAndReceipts(
+      code, expectedVersion, next, deleteReceiptId ? [deleteReceiptId] : [], [receipt],
+    );
+  }
+
+  async compareAndSwapRoomAndReceipts(
+    code: string, expectedVersion: number, next: Room,
+    deleteReceiptIds: readonly string[], appendReceipts: readonly RoomReceipt[],
+  ): Promise<boolean> {
     return this.transaction(async client => {
       const room = await client.query<{ version: number }>(
         'SELECT version FROM agent_room_rooms WHERE code = $1 FOR UPDATE', [code],
       );
       if (Number(room.rows[0]?.version) !== expectedVersion) return false;
-      if (deleteReceiptId) {
-        const legacy = await client.query(
+      for (const deleteReceiptId of deleteReceiptIds) {
+        const existing = await client.query(
           'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
           [code, deleteReceiptId],
         );
-        if (count(legacy) !== 1) return false;
+        if (count(existing) !== 1) return false;
       }
-      const collision = await client.query(
-        'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
-        [code, receipt.id],
-      );
-      if (count(collision) !== 0) return false;
+      for (const receipt of appendReceipts) {
+        const collision = await client.query(
+          'SELECT receipt_id FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2 FOR UPDATE',
+          [code, receipt.id],
+        );
+        if (count(collision) !== 0) return false;
+      }
       const updated = await client.query(
         `UPDATE agent_room_rooms
             SET topic = $3, status = $4, version = $5, room_json = $6::jsonb, updated_at = $7
@@ -154,19 +165,21 @@ export class PostgresRoomPersistence implements RoomPersistence {
         [code, expectedVersion, next.topic, next.status, next.version, JSON.stringify(next), Date.now()],
       );
       if (count(updated) !== 1) throw new Error('Atomic participant join lost its room update');
-      if (deleteReceiptId) {
+      for (const deleteReceiptId of deleteReceiptIds) {
         const deleted = await client.query(
           'DELETE FROM agent_room_receipts WHERE room_code = $1 AND receipt_id = $2', [code, deleteReceiptId],
         );
-        if (count(deleted) !== 1) throw new Error('Atomic participant join lost its legacy roster receipt');
+        if (count(deleted) !== 1) throw new Error('Atomic room mutation lost a required receipt deletion');
       }
-      const inserted = await client.query(
-        `INSERT INTO agent_room_receipts
-          (room_code, receipt_id, receipt_kind, lease_event, receipt_json, created_at)
-         VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
-        [code, receipt.id, receipt.kind, receipt.leaseEvent ?? null, JSON.stringify(receipt), receipt.createdAt],
-      );
-      if (count(inserted) !== 1) throw new Error('Atomic participant join lost its roster receipt');
+      for (const receipt of appendReceipts) {
+        const inserted = await client.query(
+          `INSERT INTO agent_room_receipts
+            (room_code, receipt_id, receipt_kind, lease_event, receipt_json, created_at)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6)`,
+          [code, receipt.id, receipt.kind, receipt.leaseEvent ?? null, JSON.stringify(receipt), receipt.createdAt],
+        );
+        if (count(inserted) !== 1) throw new Error('Atomic room mutation lost a required receipt append');
+      }
       return true;
     });
   }

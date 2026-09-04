@@ -53,6 +53,16 @@ function memoryRecords(initial = room()) {
       receipts.push(structuredClone(receipt));
       return true;
     }),
+    updateRoomAndReceipts: vi.fn(async (_code: string, version: number, next: Room,
+      deleteIds: readonly string[], appends: readonly typeof receipts[number][]) => {
+      if (refuseAtomicJoin || refuseAtomicRemoval || version !== current.version) return false;
+      const deleteIndexes = deleteIds.map(id => receipts.findIndex(item => item.id === id));
+      if (deleteIndexes.some(index => index < 0) || appends.some(receipt => receipts.some(item => item.id === receipt.id))) return false;
+      current = structuredClone(next);
+      for (const index of [...deleteIndexes].sort((a, b) => b - a)) receipts.splice(index, 1);
+      receipts.push(...structuredClone(appends));
+      return true;
+    }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
     appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
     deleteReceipt: vi.fn(async (_code: string, id: string) => {
@@ -416,9 +426,28 @@ describe('hosted room production entry', () => {
   it('fails human self-leave without changing the room or receipts when atomic cleanup refuses', async () => {
     const { base, memory, session } = await joinedHuman();
     const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
-    (memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    (memory.records.updateRoomAndReceipts as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
       method: 'DELETE', headers: { authorization: `Bearer ${session.token}` },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
+  });
+
+  it('fails human join without consuming its invite or partially adding roster state', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites?singleUse=true`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token' },
+    })).json() as { token: string };
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    (memory.records.updateRoomAndReceipts as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ inviteToken: invite.token, name: 'Atomic Human', role: 'Lead' }),
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
@@ -429,7 +458,7 @@ describe('hosted room production entry', () => {
   it('fails host removal without changing the room or receipts when atomic cleanup refuses', async () => {
     const { base, memory } = await joinedHuman();
     const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
-    (memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    (memory.records.updateRoomAndReceipts as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
     const response = await fetch(`${base}/api/rooms/ROOM1/actions`, {
       method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
       body: JSON.stringify({ action: 'remove', targetName: 'Sam', targetClient: 'web' }),

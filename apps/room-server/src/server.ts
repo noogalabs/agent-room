@@ -99,7 +99,8 @@ export async function createHostedRoomServer(
     const rosterReceipt = { id: `member-roster:${issued.identity.cardFingerprint}`, roomCode: code,
       kind: 'receipt', createdAt: participant.joinedAt,
       payload: { memberName: participant.name, memberClient: participant.client } } as const;
-    if (!await rooms.updateRoomAndReplaceReceipt(code, room.version, next, rosterReceipt)) {
+    if (!await rooms.updateRoomAndReceipts(code, room.version, next, [],
+      [...(issued.redeemedReceipt ? [issued.redeemedReceipt] : []), rosterReceipt])) {
       throw new HumanSessionError('room_version_conflict');
     }
     return { ...issued, participant };
@@ -165,10 +166,9 @@ export async function createHostedRoomServer(
           }
           const next = { ...room, version: room.version + 1,
             participants: room.participants.filter(item => item !== member) };
-          if (!await rooms.updateRoomAndReplaceReceipt(
-            code, room.version, next,
-            humans.sessionRevocationReceipt(code, member.authenticatedIdentity.cardFingerprint),
-            `member-roster:${member.authenticatedIdentity.cardFingerprint}`,
+          if (!await rooms.updateRoomAndReceipts(
+            code, room.version, next, [`member-roster:${member.authenticatedIdentity.cardFingerprint}`],
+            [humans.sessionRevocationReceipt(code, member.authenticatedIdentity.cardFingerprint)],
           )) throw new HumanSessionError('room_version_conflict');
           return reply(res, 200, { room: next });
         }
@@ -216,9 +216,9 @@ export async function createHostedRoomServer(
         const session = await humans.verifySession(bearer(req) ?? '', code);
         const room = await rooms.getRoom(code); const member = resolveSessionParticipant(room, session);
         const next = { ...room!, version: room!.version + 1, participants: room!.participants.filter(item => item !== member) };
-        if (!await rooms.updateRoomAndReplaceReceipt(code, room!.version, next,
-          humans.sessionRevocationReceipt(code, member.authenticatedIdentity!.cardFingerprint),
-          `member-roster:${member.authenticatedIdentity!.cardFingerprint}`)) {
+        if (!await rooms.updateRoomAndReceipts(code, room!.version, next,
+          [`member-roster:${member.authenticatedIdentity!.cardFingerprint}`],
+          [humans.sessionRevocationReceipt(code, member.authenticatedIdentity!.cardFingerprint)])) {
           throw new HumanSessionError('room_version_conflict');
         }
         return reply(res, 200, next);
@@ -292,8 +292,8 @@ export async function createHostedRoomServer(
         else throw new HumanSessionError('room_action_invalid');
         next = { ...next, version: room.version + 1 };
         const updated = removedRosterReceiptId && removedSessionFingerprint
-          ? await rooms.updateRoomAndReplaceReceipt(code, room.version, next,
-              humans.sessionRevocationReceipt(code, removedSessionFingerprint), removedRosterReceiptId)
+          ? await rooms.updateRoomAndReceipts(code, room.version, next, [removedRosterReceiptId],
+              [humans.sessionRevocationReceipt(code, removedSessionFingerprint)])
           : await rooms.updateRoom(code, room.version, next);
         if (!updated) throw new HumanSessionError('room_version_conflict');
         return reply(res, 200, next);
