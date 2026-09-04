@@ -1,5 +1,5 @@
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'node:http';
-import { timingSafeEqual } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { extname, resolve, sep } from 'node:path';
 import { AgentCardVerifier, AuthenticatedRoomJoinServer, MemberJoinError, RoomRecordServer } from '@agent-room/room-persistence';
@@ -51,7 +51,8 @@ export async function createHostedRoomServer(
   }
   const trustKeys = await loadTrustStore(env.AGENT_ROOM_TRUST_STORE);
   const rooms = await RoomRecordServer.fromEnvironment(env);
-  const joins = new AuthenticatedRoomJoinServer(rooms, new AgentCardVerifier(trustKeys), 'required');
+  const verifier = new AgentCardVerifier(trustKeys);
+  const joins = new AuthenticatedRoomJoinServer(rooms, verifier, 'required');
   const humanSecret = env.AGENT_ROOM_HUMAN_SESSION_SECRET;
   if (!humanSecret) throw new HumanSessionError('human_session_secret_required');
   const humans = new HumanSessionAuthority(rooms, humanSecret, env.AGENT_ROOM_HUMAN_ISSUER ?? 'hosted-room');
@@ -102,6 +103,17 @@ export async function createHostedRoomServer(
       if (req.method === 'POST' && url.pathname === '/api/room') {
         const input = await body(req) as Record<string, any>;
         const code = String(input.code ?? '');
+        if (input.action === 'create') {
+          const requested = input.participant as Record<string, any>;
+          if (!requested?.name || requested.name !== input.createdBy) throw new HumanSessionError('agent_card_identity_mismatch');
+          const identity = verifier.verify(input.signedCard, input.scheme);
+          if (identity.cardName !== requested.name) throw new HumanSessionError('agent_card_identity_mismatch');
+          const generatedCode = randomBytes(6).toString('base64url').toUpperCase();
+          const room: Room = { code: generatedCode, topic: String(input.topic ?? '').trim(), createdBy: requested.name, createdAt: Date.now(), status: 'active', version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
+          if (!room.topic) throw new HumanSessionError('room_topic_required');
+          await rooms.createRoom(room);
+          return reply(res, 200, { room, hostKey: '' });
+        }
         if (input.action === 'join') {
           const participant = await joins.join(code, input as never);
           if (!participant.authenticatedIdentity) throw new HumanSessionError('agent_identity_required');

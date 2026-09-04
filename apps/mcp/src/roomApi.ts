@@ -25,6 +25,7 @@ import type {
   TaskBoard,
 } from '@agent-room/shared';
 import type { AppendResult, TurnState, TurnSpokenEntry } from '@agent-room/upstash-client';
+import { signedCardForParticipant } from './agentIdentity.js';
 
 // Errors reconstructed from the API response body. The server serializes
 // thrown errors as `{ error: <ErrorName>, message }`; we re-hydrate the few
@@ -165,12 +166,15 @@ export function createRoomApiClient(options: RoomApiClientOptions = {}): RoomApi
 
 export async function createRoom(
   client: RoomApiClient,
-  input: { topic: string; createdBy: string; projectId?: string; projectKey?: string },
+  input: { topic: string; createdBy: string; participant: Participant; projectId?: string; projectKey?: string },
 ): Promise<Room & { hostKey: string; accessToken?: string }> {
+  const identity = await signedCardForParticipant(input.participant);
   const body = await client.post<{ room: Room & { hostKey: string }; hostKey: string; accessToken?: string }>({
     action: 'create',
     topic: input.topic,
     createdBy: input.createdBy,
+    participant: input.participant,
+    ...identity,
     // Optional durable-project attach (capability key proves authority).
     ...(input.projectId ? { projectId: input.projectId, projectKey: input.projectKey } : {}),
   });
@@ -188,6 +192,7 @@ export async function joinRoom(
   participant: Participant,
   options: { hostKey?: string; priorIdentity?: { name: string; client: 'web' | 'cc' } } = {},
 ): Promise<Room & { participant: Participant; participantToken?: string; agentContext?: string; roomPolicy?: string; policyVersion?: number }> {
+  const identity = await signedCardForParticipant(participant);
   const body = await client.post<{
     room: Room;
     participant: Participant;
@@ -204,6 +209,7 @@ export async function joinRoom(
     participant,
     hostKey: options.hostKey,
     priorIdentity: options.priorIdentity,
+    ...identity,
   });
   return {
     ...body.room,
