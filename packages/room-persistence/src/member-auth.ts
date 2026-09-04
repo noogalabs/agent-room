@@ -136,7 +136,11 @@ export class AgentCardVerifier {
     }
     const key = this.trustKeys.find(item =>
       item.fleetId === signed.card.fleetId && item.keyId === header.kid);
-    if (!key || !verifyBytes(null, signingInput(signed.card, signed.protected), key.publicKey,
+    if (!key) {
+      throw new MemberJoinError('agent_fleet_not_trusted',
+        'The Agent Card fleet and key are not present in the trust store.');
+    }
+    if (!verifyBytes(null, signingInput(signed.card, signed.protected), key.publicKey,
       Buffer.from(signed.signature, 'base64url'))) {
       throw new MemberJoinError('agent_card_signature_invalid', 'Agent Card signature could not be verified.');
     }

@@ -18,7 +18,7 @@ The verified participant record adds an `authenticatedIdentity` value containing
 
 The production join order is: validate the existing room access capability; parse the signed-card input when present; verify its JWS against the configured fleet trust store; require the selected scheme to appear both in the card and the room's accepted schemes; then atomically add the participant and verified binding through `RoomRecordServer`.
 
-Named refusal outcomes are `agent_card_signature_invalid`, `agent_card_scheme_not_accepted`, and `agent_card_required`. Under the default `required` mode, an unsigned join is refused before persistence. An unsigned join follows the prior behavior only under explicit `AGENT_ROOM_MEMBER_AUTH=legacy`. No failure path creates or partially updates a participant.
+Named refusal outcomes are `agent_fleet_not_trusted`, `agent_card_signature_invalid`, `agent_card_scheme_not_accepted`, and `agent_card_required`. `agent_fleet_not_trusted` means the well-formed card's exact fleet and key id are absent from persisted trust; malformed or unverifiable signatures remain `agent_card_signature_invalid`. Under the default `required` mode, an unsigned join is refused before persistence. An unsigned join follows the prior behavior only under explicit `AGENT_ROOM_MEMBER_AUTH=legacy`. No failure path creates or partially updates a participant.
 
 The authentication-scheme vocabulary is enforced as a runtime closed set, not
 only as a TypeScript type. Card declarations, the selected join scheme, and the
