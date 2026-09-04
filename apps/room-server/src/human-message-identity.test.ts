@@ -23,9 +23,24 @@ describe('server-owned human message identity', () => {
     expect(canonicalHumanMessage(member, { ...base, name: 'Sam' }).name).toBe('Sam');
   });
 
-  it('refuses an agent role claim while the same descriptive UI role succeeds as human', () => {
-    expect(() => canonicalHumanMessage(member, { ...base, role: 'agent' })).toThrowError(expect.objectContaining({ code: 'human_identity_mismatch' }));
+  it('canonicalizes every page-typed role to the persisted member role', () => {
+    expect(canonicalHumanMessage(member, { ...base, role: 'agent' }).role).toBe('human');
+    expect(canonicalHumanMessage(member, { ...base, role: 'host' }).role).toBe('human');
     expect(canonicalHumanMessage(member, { ...base, role: 'Lead' }).role).toBe('human');
+  });
+
+  it('refuses only a non-web client while the web client succeeds', () => {
+    expect(() => canonicalHumanMessage(member, { ...base, client: 'cc' })).toThrowError(expect.objectContaining({ code: 'human_identity_mismatch' }));
+    expect(canonicalHumanMessage(member, base).client).toBe('web');
+  });
+
+  it('refuses only supplied metadata while the same message without metadata succeeds', () => {
+    expect(() => canonicalHumanMessage(member, { ...base, metadata: { roleAtSend: 'host_directed' } })).toThrowError(expect.objectContaining({ code: 'human_identity_mismatch' }));
+    expect(canonicalHumanMessage(member, base).client).toBe('web');
+  });
+
+  it('canonicalizes supplied initials and color from the persisted participant', () => {
+    expect(canonicalHumanMessage(member, { ...base, initials: 'XX', color: '#ffffff' })).toMatchObject({ initials: 'SA', color: '#123456' });
   });
 
   it('ignores a client participant id and succeeds identically when it is absent', () => {
@@ -40,5 +55,18 @@ describe('server-owned human message identity', () => {
     const room = { code: 'ROOM1', topic: 'test', createdBy: 'David', createdAt: 1, status: 'active' as const, version: 1, participants: [host] };
     expect(resolveSessionParticipant(room, { name: 'David', identityFingerprint: 'fingerprint-david' })).toBe(host);
     expect(canonicalHumanMessage(host, { ...base, name: 'David', role: 'host' }).role).toBe('host');
+  });
+
+  it('binds membership by fingerprint when name and fingerprint point at different participants', () => {
+    const sameName = { ...member, authenticatedIdentity: { ...identity, cardFingerprint: 'fingerprint-other' } };
+    const sameFingerprint = { ...member, name: 'Other', authenticatedIdentity: { ...identity, cardName: 'Other' } };
+    const room = { code: 'ROOM1', topic: 'test', createdBy: 'Host', createdAt: 1, status: 'active' as const, version: 1, participants: [sameName, sameFingerprint] };
+    expect(() => resolveSessionParticipant(room, { name: 'Sam', identityFingerprint: 'fingerprint-sam' })).toThrowError(expect.objectContaining({ code: 'human_membership_required' }));
+  });
+
+  it('never resolves an identity-less participant for a session with an undefined fingerprint', () => {
+    const identityLess = { ...member, authenticatedIdentity: undefined };
+    const room = { code: 'ROOM1', topic: 'test', createdBy: 'Host', createdAt: 1, status: 'active' as const, version: 1, participants: [identityLess] };
+    expect(() => resolveSessionParticipant(room, { name: 'Sam', identityFingerprint: undefined })).toThrowError(expect.objectContaining({ code: 'human_membership_required' }));
   });
 });

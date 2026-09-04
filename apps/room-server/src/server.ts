@@ -215,8 +215,7 @@ export async function createHostedRoomServer(
         const room = await rooms.getRoom(code); if (!room) throw new HumanSessionError('room_not_found');
         if (input.action === 'system-message' && input.message) {
           const session = await humans.verifySession(bearer(req) ?? '', code);
-          const member = room.participants.find(item => item.client === 'web' && item.authenticatedIdentity?.cardFingerprint === session.identityFingerprint);
-          if (!member) throw new HumanSessionError('host_auth_required');
+          const member = resolveSessionParticipant(room, session);
           const supplied = input.message;
           const message: Message = { id: supplied.id, type: 'sys', name: member.name, role: member.role, initials: member.initials, color: member.color, client: 'web', text: supplied.text, time: supplied.time, attachments: supplied.attachments };
           return reply(res, 200, { sequence: await rooms.appendMessage(code, message) });

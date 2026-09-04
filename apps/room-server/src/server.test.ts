@@ -52,6 +52,15 @@ async function listenHosted(hosted: Awaited<ReturnType<typeof createHostedRoomSe
   return `http://127.0.0.1:${address.port}`;
 }
 
+async function joinedHuman() {
+  const trust = await trustFile(); const memory = memoryRecords();
+  vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+  const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+  const invite = await (await fetch(`${base}/api/rooms/ROOM1/human-invites`, { method: 'POST', headers: { authorization: 'Bearer host-test-token' } })).json() as { token: string };
+  const session = await (await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Sam', role: 'Lead', color: '#123456', initials: 'SA' }) })).json() as { token: string };
+  return { base, memory, session };
+}
+
 function hasUnrestrictedBuildContextInstruction(dockerfile: string): boolean {
   return dockerfile.split(/\r?\n/).some(rawLine => {
     const match = /^\s*(COPY|ADD)\s+(.+)$/i.exec(rawLine);
@@ -242,7 +251,7 @@ describe('hosted room production entry', () => {
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, name: 'Agent A', client: 'cc' }) });
     expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, role: 'agent' }) });
-    expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
+    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', { ...message, role: 'human' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, type: 'sys', role: 'host', metadata: { roleAtSend: 'host_directed' } }) });
     expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
@@ -254,6 +263,41 @@ describe('hosted room production entry', () => {
     expect(await response.json()).toStrictEqual({ error: 'human_session_revoked' });
     const reuse = await fetch(`${base}/api/rooms/ROOM1/human-session`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ inviteToken: invite.token, name: 'Other', role: '' }) });
     expect(await reuse.json()).toStrictEqual({ error: 'human_invite_revoked' });
+  });
+
+  it('production post refuses only a forged human name while the same self-name succeeds', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const message = { id: 30, type: 'msg', name: 'Other', role: 'Lead', initials: 'SA', color: '#123456', client: 'web', text: 'hello', time: 30 };
+    let response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(response.status).toBe(400); expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, name: 'Sam' }) });
+    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ name: 'Sam', role: 'human', client: 'web' }));
+  });
+
+  it('production post refuses only a forged client while the same web client succeeds', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const message = { id: 31, type: 'msg', name: 'Sam', role: 'Lead', initials: 'SA', color: '#123456', client: 'cc', text: 'hello', time: 31 };
+    let response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(response.status).toBe(400); expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, client: 'web' }) });
+    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ name: 'Sam', client: 'web' }));
+  });
+
+  it('production post ignores a forged participant id and supplies the persisted identity', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const message = { id: 32, type: 'msg', name: 'Sam', role: 'Lead', initials: 'SA', color: '#123456', client: 'web', text: 'hello', time: 32 };
+    let response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, participantId: 'fingerprint-other' }) });
+    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ name: 'Sam', role: 'human', client: 'web' }));
+    expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.not.objectContaining({ participantId: expect.anything() }));
+    response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
+    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ name: 'Sam', role: 'human', client: 'web' }));
+  });
+
+  it('production post accepts absent client identity fields and supplies them from the participant', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ id: 33, type: 'msg', client: 'web', text: 'hello', time: 33 }) });
+    expect(response.status).toBe(201);
+    expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', { id: 33, type: 'msg', name: 'Sam', role: 'human', initials: 'SA', color: '#123456', client: 'web', text: 'hello', time: 33, attachments: undefined });
   });
 
   it('refuses to mint a browser creator capability without the host credential', async () => {

@@ -16,11 +16,9 @@ export function resolveSessionParticipant(room: Room | null, session: SessionIde
 }
 
 export function canonicalHumanMessage(member: Participant, supplied: BrowserMessage): Message {
-  const privilegedRoles = new Set(['agent', 'host', 'moderator', 'system']);
   if (
     supplied.client !== 'web' || supplied.type !== 'msg' || supplied.metadata !== undefined
     || (supplied.name !== undefined && supplied.name !== member.name)
-    || (supplied.role !== undefined && supplied.role !== member.role && privilegedRoles.has(supplied.role))
   ) throw new HumanSessionError('human_identity_mismatch');
 
   return {
