@@ -392,6 +392,33 @@ describe('hosted room production entry', () => {
     expect(await after.json()).toStrictEqual({ error: 'human_session_revoked' });
   });
 
+  it('fails human self-leave without changing the room or receipts when atomic cleanup refuses', async () => {
+    const { base, memory, session } = await joinedHuman();
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    (memory.records.updateRoomAndDeleteReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/rooms/ROOM1/human-session`, {
+      method: 'DELETE', headers: { authorization: `Bearer ${session.token}` },
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
+  });
+
+  it('fails host removal without changing the room or receipts when atomic cleanup refuses', async () => {
+    const { base, memory } = await joinedHuman();
+    const beforeRoom = memory.current(); const beforeReceipts = memory.receipts();
+    (memory.records.updateRoomAndDeleteReceipt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/rooms/ROOM1/actions`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'remove', targetName: 'Sam', targetClient: 'web' }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(memory.current()).toStrictEqual(beforeRoom);
+    expect(memory.receipts()).toStrictEqual(beforeReceipts);
+  });
+
   it('refuses both room and message reads from a removed agent existing session token', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
@@ -687,6 +714,7 @@ describe('hosted room production entry', () => {
     });
 
     expect((await joinAgent(ceeCard)).status).toBe(200);
+    expect((memory.records.updateRoomAndReplaceReceipt as ReturnType<typeof vi.fn>).mock.calls.at(-1)?.[4]).toBeUndefined();
     expect(memory.receipts().map(item => item.id)).toContain(legacyReceiptId);
     const authority = new HumanSessionAuthority(memory.records, 'h'.repeat(48), 'hosted-room');
     const beeToken = authority.issueAgentSession('ROOM1', bee.authenticatedIdentity).token;

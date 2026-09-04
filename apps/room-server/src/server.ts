@@ -213,9 +213,11 @@ export async function createHostedRoomServer(
         const session = await humans.verifySession(bearer(req) ?? '', code);
         const room = await rooms.getRoom(code); const member = resolveSessionParticipant(room, session);
         const next = { ...room!, version: room!.version + 1, participants: room!.participants.filter(item => item !== member) };
-        if (!await rooms.updateRoom(code, room!.version, next)) throw new HumanSessionError('room_version_conflict');
+        if (!await rooms.updateRoomAndDeleteReceipt(code, room!.version, next,
+          `member-roster:${member.authenticatedIdentity!.cardFingerprint}`)) {
+          throw new HumanSessionError('room_version_conflict');
+        }
         await humans.revokeSession(code, member.authenticatedIdentity!.cardFingerprint);
-        await rooms.deleteReceipt(code, `member-roster:${member.authenticatedIdentity!.cardFingerprint}`);
         return reply(res, 200, next);
       }
       const presenceMatch = /^\/api\/rooms\/([^/]+)\/human-presence$/.exec(url.pathname);
@@ -286,9 +288,11 @@ export async function createHostedRoomServer(
         else if (input.action === 'reply-mode') next = { ...room, replyMode: input.mode, modeConfig: input.config };
         else throw new HumanSessionError('room_action_invalid');
         next = { ...next, version: room.version + 1 };
-        if (!await rooms.updateRoom(code, room.version, next)) throw new HumanSessionError('room_version_conflict');
+        const updated = removedRosterReceiptId
+          ? await rooms.updateRoomAndDeleteReceipt(code, room.version, next, removedRosterReceiptId)
+          : await rooms.updateRoom(code, room.version, next);
+        if (!updated) throw new HumanSessionError('room_version_conflict');
         if (removedSessionFingerprint) await humans.revokeSession(code, removedSessionFingerprint);
-        if (removedRosterReceiptId) await rooms.deleteReceipt(code, removedRosterReceiptId);
         return reply(res, 200, next);
       }
       if (!match) return reply(res, 404, { error: 'not_found' });
