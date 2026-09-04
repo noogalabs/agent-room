@@ -571,6 +571,45 @@ describe('hosted room production entry', () => {
     expect(memory.receipts()).toStrictEqual(beforeReceipts);
   });
 
+  it('does not let one same-key agent consume another agents legacy receipt', async () => {
+    const trust = await trustFile();
+    const beeCard = { protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent Bee', url: 'https://fleet.invalid/bee', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2' as const] };
+    const ceeCard = { ...beeCard, name: 'Agent Cee', url: 'https://fleet.invalid/cee' };
+    const publicDer = trust.publicKey.export({ type: 'spki', format: 'der' });
+    const legacyFingerprint = createHash('sha256').update(beeCard.fleetId).update('\0').update(publicDer).digest('hex');
+    const legacyReceiptId = `member-roster:${legacyFingerprint}`;
+    const bee = { name: beeCard.name, role: '', color: '#000000', initials: 'AB', client: 'cc' as const,
+      joinedAt: 1, lastSeenAt: 1, authenticatedIdentity: { cardFingerprint: legacyFingerprint,
+        fleetId: beeCard.fleetId, cardName: beeCard.name, scheme: 'oauth2' as const, keyId: 'key-a', verifiedAt: 1 } };
+    const memory = memoryRecords({ ...room(), participants: [bee] });
+    await memory.records.appendReceipt({ id: legacyReceiptId, roomCode: 'ROOM1', kind: 'receipt', createdAt: 1,
+      payload: { memberName: bee.name, memberClient: bee.client } });
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const joinAgent = (card: typeof beeCard) => fetch(`${base}/api/rooms/ROOM1/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ participant: { name: card.name, role: '', color: '#000000', initials: card.name.slice(-1), client: 'cc' },
+        signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
+    });
+
+    expect((await joinAgent(ceeCard)).status).toBe(200);
+    expect(memory.receipts().map(item => item.id)).toContain(legacyReceiptId);
+    const authority = new HumanSessionAuthority(memory.records, 'h'.repeat(48), 'hosted-room');
+    const beeToken = authority.issueAgentSession('ROOM1', bee.authenticatedIdentity).token;
+    const leave = await fetch(`${base}/api/room`, { method: 'POST',
+      headers: { authorization: `Bearer ${beeToken}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ action: 'removeParticipant', code: 'ROOM1', requesterName: bee.name,
+        targetName: bee.name, targetClient: bee.client }) });
+    expect(leave.status).toBe(200);
+    expect(memory.receipts().map(item => item.id)).not.toContain(legacyReceiptId);
+
+    expect((await joinAgent(beeCard)).status).toBe(200);
+    expect(memory.current().participants.map(item => item.name).sort()).toEqual(['Agent Bee', 'Agent Cee']);
+    const roster = memory.receipts().filter(item => item.id.startsWith('member-roster:'));
+    expect(roster).toHaveLength(2);
+    expect(roster.every(item => item.payload.fingerprintVersion === 2)).toBe(true);
+  });
+
   it('refuses expired and tampered human sessions by name', async () => {
     const memory = memoryRecords(); let now = 1_000;
     const authority = new HumanSessionAuthority(memory.records, 's'.repeat(48), 'hosted-room', () => now);

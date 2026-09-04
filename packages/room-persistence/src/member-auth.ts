@@ -216,7 +216,10 @@ export class AuthenticatedRoomJoinServer {
           prior.keyId === identity!.keyId;
       });
       const hasLegacyReceipt = (await this.rooms.listReceipts(code)).some(receipt => receipt.id === legacyReceiptId);
-      if (!hasLegacyReceipt) legacyReceiptId = undefined;
+      // The v1 id identified a whole fleet key, not one card name. Delete it
+      // only when this verified card also owns a matching legacy participant
+      // row; otherwise a same-key agent could consume another agent's receipt.
+      if (!hasLegacyReceipt || legacyRows.length === 0) legacyReceiptId = undefined;
       const matches = room.participants.filter(item =>
         item.authenticatedIdentity?.cardFingerprint === identity.cardFingerprint);
       if (matches.length > 0) {
