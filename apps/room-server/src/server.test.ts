@@ -588,6 +588,23 @@ describe('hosted room production entry', () => {
     expect((await retried.json() as { participant: Room['participants'][number] }).participant.name).toBe('Same Host');
   });
 
+  it('refuses loudly when a failed browser creation cannot be rolled back', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'LOUDRB' }),
+    })).json() as { token: string };
+    memory.refuseAtomicJoin();
+    vi.mocked(memory.records.deleteRoomIfVersion).mockResolvedValueOnce(false);
+    const response = await fetch(`${base}/api/browser-rooms`, {
+      method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'LOUDRB', topic: 'rollback', name: 'Host', role: 'host', color: '#123456', initials: 'HO' }),
+    });
+    expect(await response.json()).toStrictEqual({ error: 'browser_room_rollback_failed' });
+  });
+
   it('keeps a room-lifetime human invite reusable, revokes only future joins, refreshes presence, and frees a seat on leave', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
