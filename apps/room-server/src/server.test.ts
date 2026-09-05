@@ -1168,7 +1168,43 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     } finally { await restore(); }
   }
 
-  it('removes a newly created browser room when its real Postgres creator join fails', async () => {
+  it('classifies a real Postgres creator CAS loss as a version conflict and removes the room', async () => {
+    const code = `VC${Date.now()}`; const trust = await trustFile();
+    const hosted = await createHostedRoomServer(hostedEnv(trust.path, {
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl,
+    }));
+    const base = await listenHosted(hosted);
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code }),
+    })).json() as { token: string };
+    const create = () => fetch(`${base}/api/browser-rooms`, {
+      method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code, topic: 'retry', name: 'Same Host', role: 'host', color: '#123456', initials: 'SH' }),
+    });
+    const admin = new Pool({ connectionString: postgresUrl });
+    const update = hosted.rooms.updateRoomAndReceipts.bind(hosted.rooms);
+    vi.spyOn(hosted.rooms, 'updateRoomAndReceipts').mockImplementationOnce(async (
+      roomCode, expectedVersion, next, deleteIds, appends,
+    ) => {
+      await admin.query(`UPDATE agent_room_rooms
+        SET version = version + 1,
+            room_json = jsonb_set(room_json, '{version}', to_jsonb(version + 1))
+        WHERE code = $1`, [roomCode]);
+      return update(roomCode, expectedVersion, next, deleteIds, appends);
+    });
+    try {
+      const failed = await create();
+      expect(failed.status).toBe(400);
+      expect(await failed.json()).toStrictEqual({ error: 'room_version_conflict' });
+      expect(await hosted.rooms.getRoom(code)).toBeNull();
+      expect(await hosted.rooms.listReceipts(code)).toStrictEqual([]);
+    } finally { await admin.end(); }
+    expect((await create()).status).toBe(201);
+    expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name)).toStrictEqual(['Same Host']);
+  });
+
+  it('classifies a raw Postgres creator failure distinctly and removes the room', async () => {
     const code = `BC${Date.now()}`; const trust = await trustFile();
     const hosted = await createHostedRoomServer(hostedEnv(trust.path, {
       AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl,
@@ -1185,8 +1221,8 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     const restore = await rejectReceiptAppendFor(code);
     try {
       const failed = await create();
-      expect(await failed.json()).toStrictEqual({ error: 'room_version_conflict' });
-      expect(failed.status).toBe(400);
+      expect(failed.status).toBe(500);
+      expect(await failed.json()).toStrictEqual({ error: 'browser_room_create_failed' });
       expect(await hosted.rooms.getRoom(code)).toBeNull();
       expect(await hosted.rooms.listReceipts(code)).toStrictEqual([]);
     } finally { await restore(); }

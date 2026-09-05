@@ -27,7 +27,8 @@ async function body(req: IncomingMessage): Promise<unknown> {
 
 function error(res: ServerResponse, value: unknown): void {
   const code = value instanceof MemberJoinError || value instanceof HumanSessionError || value instanceof TrustStoreError ? value.code : 'internal_error';
-  const status = code === 'room_not_found' ? 404 : code === 'internal_error' ? 500 : 400;
+  const status = code === 'room_not_found' ? 404 :
+    code === 'internal_error' || code === 'browser_room_create_failed' ? 500 : 400;
   reply(res, status, { error: code });
 }
 
@@ -216,13 +217,9 @@ export async function createHostedRoomServer(
         await createRoomExclusive(room);
         let joined: Awaited<ReturnType<typeof addHuman>>;
         let persistedRoom: Room | null = null;
-        let joinAttempted = false;
-        let joinCommitted = false;
         try {
-          joinAttempted = true;
           const invite = await humans.issueInvite(room.code);
           joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
-          joinCommitted = true;
           persistedRoom = await rooms.getRoom(room.code);
           if (!persistedRoom) throw new HumanSessionError('room_not_found');
         } catch (caught) {
@@ -237,8 +234,9 @@ export async function createHostedRoomServer(
             console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: current.version });
             throw new HumanSessionError('browser_room_rollback_failed');
           }
-          if (joinAttempted && !joinCommitted && !(caught instanceof HumanSessionError)) {
-            throw new HumanSessionError('room_version_conflict');
+          if (!(caught instanceof HumanSessionError)) {
+            console.error('browser_room_create_failed', { roomCode: room.code, cause: caught });
+            throw new HumanSessionError('browser_room_create_failed');
           }
           throw caught;
         }
