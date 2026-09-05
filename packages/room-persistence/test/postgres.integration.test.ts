@@ -98,6 +98,24 @@ describePostgres('Postgres durable room production entry', () => {
     });
   });
 
+  it('deletes a room and its receipts only at the matching version', async () => {
+    const target = { ...room(), code: 'PGS-DEL-CAS', participants: [] };
+    const receipt: RoomReceipt = {
+      id: 'delete-cas-receipt', roomCode: target.code, kind: 'receipt',
+      createdAt: 1_700_000_000_451, payload: { disposition: 'delete-with-room' },
+    };
+    await first.createRoom(target);
+    expect(await first.appendReceipt(receipt)).toBe(true);
+
+    expect(await first.deleteRoomIfVersion(target.code, target.version + 1)).toBe(false);
+    expect(await first.getRoom(target.code)).toStrictEqual(target);
+    expect(await first.listReceipts(target.code)).toStrictEqual([receipt]);
+
+    expect(await first.deleteRoomIfVersion(target.code, target.version)).toBe(true);
+    expect(await first.getRoom(target.code)).toBeNull();
+    expect(await first.listReceipts(target.code)).toStrictEqual([]);
+  });
+
   it('keeps fleet trust keys across server restarts and removes only the selected key', async () => {
     const firstPair = generateKeyPairSync('ed25519'); const secondPair = generateKeyPairSync('ed25519');
     const firstKey = { fleetId: 'fleet-one', keyId: 'key-one', publicKey: firstPair.publicKey.export({ format: 'jwk' }) };
