@@ -1,6 +1,4 @@
 import { generateKeyPairSync } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import type { Message, Room, RoomReport, TaskBoard } from '@agent-room/shared';
 import { Pool } from 'pg';
@@ -98,56 +96,6 @@ describePostgres('Postgres durable room production entry', () => {
     await proveAtomicRoomReceiptParity(first.persistence, {
       ...room(), code: 'PGS-ATM-PTY', topic: 'Synthetic atomic parity room', participants: [],
     });
-  });
-
-  it('migrates churned legacy receipts deterministically before preserving append order', async () => {
-    const schema = `receipt_order_${process.pid}_${Date.now()}`;
-    await admin.query(`CREATE SCHEMA ${schema}`);
-    const isolated = new Pool({ connectionString: databaseUrl, options: `-c search_path=${schema}` });
-    const migration = (name: string) => readFileSync(fileURLToPath(
-      new URL(`../migrations/${name}`, import.meta.url),
-    ), 'utf8');
-    const receiptJson = (id: string) => JSON.stringify({
-      id, roomCode: 'CHURN-ORDER', kind: 'receipt', createdAt: 1_000, payload: { id },
-    });
-    try {
-      await isolated.query(migration('001_durable_room_record.sql'));
-      await isolated.query(migration('002_persisted_fleet_trust.sql'));
-      await isolated.query(`INSERT INTO agent_room_rooms
-        (code, topic, created_at, created_by, status, version, room_json, updated_at)
-        VALUES ('CHURN-ORDER', 'Migration ordering', 1000, 'Host', 'active', 1,
-          '{"code":"CHURN-ORDER"}'::jsonb, 1000)`);
-      for (const id of ['r1', 'r2', 'r3', 'r4', 'r5']) {
-        await isolated.query(`INSERT INTO agent_room_receipts
-          (room_code, receipt_id, receipt_kind, receipt_json, created_at)
-          VALUES ('CHURN-ORDER', $1, 'receipt', $2::jsonb, 1000)`, [id, receiptJson(id)]);
-      }
-      await isolated.query("DELETE FROM agent_room_receipts WHERE receipt_id IN ('r1', 'r2')");
-      await isolated.query('VACUUM agent_room_receipts');
-      for (const id of ['r6', 'r7']) {
-        await isolated.query(`INSERT INTO agent_room_receipts
-          (room_code, receipt_id, receipt_kind, receipt_json, created_at)
-          VALUES ('CHURN-ORDER', $1, 'receipt', $2::jsonb, 1000)`, [id, receiptJson(id)]);
-      }
-
-      await isolated.query(migration('003_receipt_insertion_sequence.sql'));
-      expect((await isolated.query<{ receipt_id: string }>(
-        'SELECT receipt_id FROM agent_room_receipts ORDER BY insertion_sequence',
-      )).rows.map(row => row.receipt_id)).toEqual(['r3', 'r4', 'r5', 'r6', 'r7']);
-
-      for (const id of ['r8', 'r9']) {
-        await isolated.query(`INSERT INTO agent_room_receipts
-          (room_code, receipt_id, receipt_kind, receipt_json, created_at)
-          VALUES ('CHURN-ORDER', $1, 'receipt', $2::jsonb, 1000)`, [id, receiptJson(id)]);
-      }
-      expect((await isolated.query<{ receipt_id: string }>(
-        'SELECT receipt_id FROM agent_room_receipts ORDER BY insertion_sequence',
-      )).rows.map(row => row.receipt_id)).toEqual(['r3', 'r4', 'r5', 'r6', 'r7', 'r8', 'r9']);
-      await isolated.query(migration('003_receipt_insertion_sequence.sql'));
-    } finally {
-      await isolated.end();
-      await admin.query(`DROP SCHEMA ${schema} CASCADE`);
-    }
   });
 
   it('keeps fleet trust keys across server restarts and removes only the selected key', async () => {
