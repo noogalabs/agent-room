@@ -7,7 +7,8 @@ COPY packages/upstash-client ./packages/upstash-client
 COPY packages/room-persistence ./packages/room-persistence
 COPY apps/room-server ./apps/room-server
 COPY apps/web ./apps/web
+COPY scripts/start-room-server.sh /app/scripts/start-room-server.sh
 RUN npm ci --include-workspace-root -w packages/shared -w packages/upstash-client -w packages/room-persistence -w apps/room-server -w apps/web \
  && npm run build -w packages/shared -w packages/upstash-client -w packages/room-persistence -w apps/room-server -w apps/web
 ENV NODE_ENV=production
-CMD ["node", "apps/room-server/dist/index.js"]
+CMD ["sh", "scripts/start-room-server.sh"]

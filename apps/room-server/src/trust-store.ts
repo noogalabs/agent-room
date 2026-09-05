@@ -40,10 +40,14 @@ export function hydrateTrustKeys(stored: readonly StoredFleetTrustKey[]): FleetT
 }
 
 export async function loadStoredTrustStore(path: string | undefined): Promise<StoredFleetTrustKey[]> {
-  if (!path?.trim()) throw new TrustStoreError('trust_store_required', 'AGENT_ROOM_TRUST_STORE is required.');
+  if (!path?.trim()) return [];
   let parsed: unknown;
   try { parsed = JSON.parse(await readFile(path, 'utf8')); }
   catch { throw new TrustStoreError('trust_store_invalid', 'Trust store is unreadable or malformed.'); }
+  // The public image deliberately starts with no trusted fleets. Operators
+  // supply their own public anchors at deploy time; an empty array is a safe,
+  // zero-trust community default rather than a reason to crash-loop.
+  if (Array.isArray(parsed) && parsed.length === 0) return [];
   return validateStoredTrustKeys(parsed);
 }
 

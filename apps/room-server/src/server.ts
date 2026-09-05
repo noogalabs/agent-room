@@ -56,6 +56,9 @@ export async function createHostedRoomServer(
     let seedTrustKeys;
     try { seedTrustKeys = await loadStoredTrustStore(env.AGENT_ROOM_TRUST_STORE); }
     catch (caught) { await rooms.close(); throw caught; }
+    if (seedTrustKeys.length === 0) {
+      console.warn('agent_room_trust_store_empty: starting with zero trusted fleets');
+    }
     for (const key of seedTrustKeys) await rooms.putFleetTrustKey(key);
     storedTrustKeys = await rooms.listFleetTrustKeys();
   }
