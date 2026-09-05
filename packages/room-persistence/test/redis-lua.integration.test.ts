@@ -9,6 +9,12 @@ import {
 } from '../src/redis.js';
 
 const redisUrl = process.env.TEST_REDIS_URL;
+if (!redisUrl && (process.env.CI || process.env.GITHUB_ACTIONS)) {
+  throw new Error('redis_lua_test_url_required: TEST_REDIS_URL must be set in CI');
+}
+if (!redisUrl) {
+  console.warn('redis_lua_tests_skipped: TEST_REDIS_URL is not set');
+}
 const redisHost = redisUrl ? new URL(redisUrl).hostname : undefined;
 if (redisHost && !['127.0.0.1', 'localhost', '::1'].includes(redisHost)) {
   throw new Error(`TEST_REDIS_URL must target a local disposable Redis instance, received ${redisHost}`);
