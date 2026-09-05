@@ -66,11 +66,13 @@ export class HumanSessionAuthority {
     const id = randomBytes(18).toString('base64url');
     const expiresAt = reusable ? Number.MAX_SAFE_INTEGER : this.now() + ttlMs;
     const receipt: RoomReceipt = { id: `human-invite:${id}:issued`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_issued', inviteId: id, expiresAt, reusable } };
+    // receipt-census-exempt: invite-issued — issuing an invite changes receipt state only; there is no room mutation to pair.
     if (!await this.rooms.appendReceipt(receipt)) throw new HumanSessionError('human_invite_collision');
     return { id, expiresAt, token: this.sign({ purpose: 'invite', roomCode, id, expiresAt, reusable }) };
   }
 
   async revokeInvite(roomCode: string, id: string): Promise<void> {
+    // receipt-census-exempt: invite-revoked — revoking an invite changes receipt state only; there is no room mutation to pair.
     await this.rooms.appendReceipt({ id: `human-invite:${id}:revoked`, roomCode, kind: 'receipt', createdAt: this.now(), payload: { event: 'human_invite_revoked', inviteId: id } });
   }
 

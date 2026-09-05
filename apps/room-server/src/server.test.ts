@@ -1043,7 +1043,14 @@ describe('hosted room production entry', () => {
     const docker = await readFile(new URL('Dockerfile', root), 'utf8');
     const railway = await readFile(new URL('railway.json', root), 'utf8');
     const pkg = JSON.parse(await readFile(new URL('apps/room-server/package.json', root), 'utf8'));
-    const entry = await readFile(new URL('apps/room-server/src/server.ts', root), 'utf8');
+    const receiptMutationFiles = [
+      'apps/room-server/src/server.ts',
+      'apps/room-server/src/human-sessions.ts',
+    ] as const;
+    const receiptMutationSources = await Promise.all(receiptMutationFiles.map(async path => ({
+      path, source: await readFile(new URL(path, root), 'utf8'),
+    })));
+    const entry = receiptMutationSources[0]!.source;
     const joinScreen = await readFile(new URL('apps/web/src/screens/Join.tsx', root), 'utf8');
     const lobbyScreen = await readFile(new URL('apps/web/src/screens/Lobby.tsx', root), 'utf8');
     const createScreen = await readFile(new URL('apps/web/src/screens/CreateMeeting.tsx', root), 'utf8');
@@ -1078,10 +1085,26 @@ describe('hosted room production entry', () => {
     expect(pkg.dependencies['@agent-room/room-persistence']).toBe('*');
     expect(entry).toContain('RoomRecordServer.fromEnvironment');
     expect(entry).toContain("env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist'");
-    // Route handlers in server.ts may update room-only state directly, but
-    // receipt-bearing changes must stay paired with the room CAS in one operation.
-    expect(entry).not.toMatch(/\brooms\.(?:appendReceipt|deleteReceipt)\s*\(/);
-    expect(entry).toContain('rooms.updateRoomAndReceipts(');
+    // This enumerated production-source census covers server.ts and human-sessions.ts.
+    // Any direct receipt mutation must carry a reviewed, reasoned exemption on the preceding line.
+    const approvedReceiptMutationExemptions = [
+      'receipt-census-exempt: invite-issued — issuing an invite changes receipt state only; there is no room mutation to pair.',
+      'receipt-census-exempt: invite-revoked — revoking an invite changes receipt state only; there is no room mutation to pair.',
+    ];
+    const observedReceiptMutationExemptions: string[] = [];
+    for (const { path, source } of receiptMutationSources) {
+      const lines = source.split('\n');
+      for (const [index, line] of lines.entries()) {
+        // Scanning the method token, not a literal `rooms.` receiver, also catches aliases and destructuring.
+        if (!/\b(?:appendReceipt|deleteReceipt)\b/.test(line)) continue;
+        const exemption = lines[index - 1]?.trim().replace(/^\/\/\s*/, '');
+        expect(approvedReceiptMutationExemptions,
+          `${path}:${index + 1} has an unreviewed direct receipt mutation`).toContain(exemption);
+        observedReceiptMutationExemptions.push(exemption!);
+      }
+    }
+    expect(observedReceiptMutationExemptions).toStrictEqual(approvedReceiptMutationExemptions);
+    expect(entry.match(/\brooms\.updateRoomAndReceipts\s*\(/g)).toHaveLength(4);
     expect(joinScreen).toContain('exchangeHumanInvite');
     expect(lobbyScreen).toContain('issueHostedInvite');
     expect(lobbyScreen).toContain('invite.joinPath');
