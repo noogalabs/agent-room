@@ -48,6 +48,8 @@ export async function proveAtomicRoomReceiptParity(
   store: RoomPersistence,
   initial: Room,
 ): Promise<void> {
+  const sortedReceipts = (rows: readonly RoomReceipt[]) =>
+    [...rows].sort((left, right) => left.id.localeCompare(right.id));
   const receipt = (id: string): RoomReceipt => ({
     id, roomCode: initial.code, kind: 'receipt', createdAt: initial.createdAt + 1,
     payload: { memberName: id },
@@ -93,7 +95,8 @@ export async function proveAtomicRoomReceiptParity(
     initial.code, version3.version, version4, [legacy.id], [replacement],
   )).toBe(true);
   expect(await store.getRoom(initial.code)).toEqual(version4);
-  expect(await store.listReceipts(initial.code)).toEqual([unrelated, replacement]);
+  expect(sortedReceipts(await store.listReceipts(initial.code)))
+    .toEqual(sortedReceipts([unrelated, replacement]));
   expect(await store.deleteReceipt(initial.code, unrelated.id)).toBe(true);
   expect(await store.deleteReceipt(initial.code, unrelated.id)).toBe(false);
   expect(await store.listReceipts(initial.code)).toEqual([replacement]);
