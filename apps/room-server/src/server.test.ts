@@ -1047,10 +1047,20 @@ describe('hosted room production entry', () => {
       'apps/room-server/src/server.ts',
       'apps/room-server/src/human-sessions.ts',
     ] as const;
-    const receiptMutationSources = await Promise.all(receiptMutationFiles.map(async path => ({
-      path, source: await readFile(new URL(path, root), 'utf8'),
-    })));
-    const entry = receiptMutationSources[0]!.source;
+    const roomServerSourceDirectory = new URL('apps/room-server/src/', root);
+    const productionSources = await Promise.all((await readdir(roomServerSourceDirectory, { withFileTypes: true }))
+      .filter(entry => entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts'))
+      .map(async entry => ({
+        path: `apps/room-server/src/${entry.name}`,
+        source: await readFile(new URL(entry.name, roomServerSourceDirectory), 'utf8'),
+      })));
+    const derivedReceiptMutationFiles = productionSources
+      .filter(({ source }) => /\b(?:appendReceipt|deleteReceipt|updateRoomAndReceipts)\b/.test(source))
+      .map(({ path }) => path)
+      .sort();
+    expect(derivedReceiptMutationFiles).toStrictEqual([...receiptMutationFiles].sort());
+    const receiptMutationSources = productionSources.filter(({ path }) => derivedReceiptMutationFiles.includes(path));
+    const entry = receiptMutationSources.find(({ path }) => path === 'apps/room-server/src/server.ts')!.source;
     const joinScreen = await readFile(new URL('apps/web/src/screens/Join.tsx', root), 'utf8');
     const lobbyScreen = await readFile(new URL('apps/web/src/screens/Lobby.tsx', root), 'utf8');
     const createScreen = await readFile(new URL('apps/web/src/screens/CreateMeeting.tsx', root), 'utf8');
