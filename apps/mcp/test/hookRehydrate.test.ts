@@ -5,12 +5,17 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 beforeEach(() => {
-  process.env.CODEX_THREAD_ID = '';
+  // detectHarness checks Claude Code before Codex. Neutralize inherited
+  // harness markers so these fixtures always exercise the Codex state file.
+  vi.stubEnv('CLAUDECODE', '');
+  vi.stubEnv('CLAUDE_CODE_ENTRYPOINT', '');
+  vi.stubEnv('CODEX_THREAD_ID', '');
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
-  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.CODEX_THREAD_ID; delete process.env.AGENT_ROOM_STATE_FILE;
+  vi.unstubAllEnvs();
+  delete process.env.AGENT_ROOM_STATE_DIR; delete process.env.CODEX_RUN_ID; delete process.env.AGENT_ROOM_STATE_FILE;
 });
 
 function harnessFile(dir: string, sessionId = 'run-1') {
