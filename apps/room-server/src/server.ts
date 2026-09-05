@@ -28,7 +28,7 @@ async function body(req: IncomingMessage): Promise<unknown> {
 function error(res: ServerResponse, value: unknown): void {
   const code = value instanceof MemberJoinError || value instanceof HumanSessionError || value instanceof TrustStoreError ? value.code : 'internal_error';
   const status = code === 'room_not_found' ? 404 :
-    code === 'internal_error' || code === 'browser_room_create_failed' ? 500 : 400;
+    code === 'internal_error' || code === 'browser_room_create_failed' || code === 'browser_room_rollback_failed' ? 500 : 400;
   reply(res, status, { error: code });
 }
 
@@ -221,7 +221,7 @@ export async function createHostedRoomServer(
           joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
         } catch (caught) {
           if (!await rooms.deleteRoomIfVersion(room.code, room.version)) {
-            console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: room.version });
+            console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: room.version, cause: caught });
             throw new HumanSessionError('browser_room_rollback_failed');
           }
           if (!(caught instanceof HumanSessionError)) {

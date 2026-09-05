@@ -611,8 +611,11 @@ describe('hosted room production entry', () => {
       method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ code: 'LOUDRB', topic: 'rollback', name: 'Host', role: 'host', color: '#123456', initials: 'HO' }),
     });
+    expect(response.status).toBe(500);
     expect(await response.json()).toStrictEqual({ error: 'browser_room_rollback_failed' });
-    expect(logged).toHaveBeenCalledWith('browser_room_rollback_failed', expect.objectContaining({ roomCode: 'LOUDRB', expectedVersion: 1 }));
+    expect(logged).toHaveBeenCalledWith('browser_room_rollback_failed', expect.objectContaining({
+      roomCode: 'LOUDRB', expectedVersion: 1, cause: expect.objectContaining({ code: 'room_version_conflict' }),
+    }));
   });
 
   it('keeps the committed creator join when response construction fails after addHuman resolves', async () => {
