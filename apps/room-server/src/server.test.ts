@@ -974,8 +974,8 @@ describe('hosted room production entry', () => {
     expect(pkg.dependencies['@agent-room/room-persistence']).toBe('*');
     expect(entry).toContain('RoomRecordServer.fromEnvironment');
     expect(entry).toContain("env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist'");
-    // Route handlers may update room-only state directly, but receipt-bearing
-    // changes must stay paired with the room CAS in one persistence operation.
+    // Route handlers in server.ts may update room-only state directly, but
+    // receipt-bearing changes must stay paired with the room CAS in one operation.
     expect(entry).not.toMatch(/\brooms\.(?:appendReceipt|deleteReceipt)\s*\(/);
     expect(entry).toContain('rooms.updateRoomAndReceipts(');
     expect(joinScreen).toContain('exchangeHumanInvite');
