@@ -1,6 +1,6 @@
 import { createHash, createHmac, generateKeyPairSync } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { Server as HttpServer } from 'node:http';
+import { Server as HttpServer, ServerResponse as HttpServerResponse } from 'node:http';
 import { mkdtemp, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -615,7 +615,7 @@ describe('hosted room production entry', () => {
     expect(logged).toHaveBeenCalledWith('browser_room_rollback_failed', expect.objectContaining({ roomCode: 'LOUDRB', expectedVersion: 1 }));
   });
 
-  it('builds the response from the committed creator join without a fallible post-commit re-read', async () => {
+  it('keeps the committed creator join when response construction fails after addHuman resolves', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
@@ -629,9 +629,15 @@ describe('hosted room production entry', () => {
     });
 
     memory.failCommittedRoomRead();
-    const created = await create();
-    expect(created.status).toBe(201);
-    expect((await created.json() as { participant: Room['participants'][number] }).participant.name).toBe('Same Host');
+    const writeHead = HttpServerResponse.prototype.writeHead;
+    let failResponse = true;
+    vi.spyOn(HttpServerResponse.prototype, 'writeHead').mockImplementation(function (this: HttpServerResponse, ...args: Parameters<typeof writeHead>) {
+      if (failResponse) { failResponse = false; throw new Error('synthetic post-commit response failure'); }
+      return writeHead.apply(this, args);
+    });
+    const failed = await create();
+    expect(failed.status).toBe(500);
+    expect(await failed.json()).toStrictEqual({ error: 'internal_error' });
     expect(memory.current()).toMatchObject({ code: 'POSTJOIN', version: 2,
       participants: [expect.objectContaining({ name: 'Same Host' })] });
     expect(memory.receipts()).toHaveLength(3);
