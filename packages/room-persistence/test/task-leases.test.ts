@@ -34,6 +34,7 @@ class LeaseMemoryPersistence implements RoomPersistence {
   boardWrites = 0;
   beforeLeaseCas?: () => void;
   async createRoom(value: Room) { this.currentRoom = structuredClone(value); }
+  async deleteRoomIfVersion() { return false; }
   async getRoom(code: string) { return code === this.currentRoom.code ? structuredClone(this.currentRoom) : null; }
   async listFleetTrustKeys() { return []; }
   async putFleetTrustKey() {}

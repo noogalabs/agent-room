@@ -14,6 +14,15 @@ const receiptsKey = (code: string): string => `room-receipts:${code}`;
 const fleetTrustIdsKey = 'agent-room:fleet-trust-ids';
 const fleetTrustKey = (id: string): string => `agent-room:fleet-trust:${id}`;
 
+export const ROOM_DELETE_IF_VERSION_SCRIPT = [
+  "local raw = redis.call('GET', KEYS[1])",
+  'if not raw then return 0 end',
+  'local current = cjson.decode(raw)',
+  'if tonumber(current.version) ~= tonumber(ARGV[1]) then return 0 end',
+  "redis.call('DEL', unpack(KEYS))",
+  'return 1',
+].join('\n');
+
 export const ROOM_CAS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   'if not raw then return 0 end',
@@ -196,6 +205,14 @@ export class RedisRoomPersistence implements RoomPersistence {
   async createRoom(room: Room): Promise<void> {
     const result = await this.client.command(['SET', roomKey(room.code), JSON.stringify(room), 'EX', ROOM_TTL_SECONDS, 'NX']);
     if (result === null) throw new Error(`Room ${room.code} already exists`);
+  }
+
+  async deleteRoomIfVersion(code: string, expectedVersion: number): Promise<boolean> {
+    const result = await this.client.command<number>([
+      'EVAL', ROOM_DELETE_IF_VERSION_SCRIPT, '6', roomKey(code), messagesKey(code), messageCountKey(code),
+      taskBoardKey(code), receiptsKey(code), receiptIdsKey(code), String(expectedVersion),
+    ]);
+    return Number(result) === 1;
   }
 
   async getRoom(code: string): Promise<Room | null> {

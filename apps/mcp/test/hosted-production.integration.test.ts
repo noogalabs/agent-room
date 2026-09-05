@@ -54,7 +54,16 @@ describe('hosted production MCP entry', () => {
     const keys = generateKeyPairSync('ed25519'); const participant = { name: 'Agent A', role: '', color: '#000', initials: 'AA', client: 'cc' as const, joinedAt: 1, lastSeenAt: 1 };
     await writeFile(cardPath, JSON.stringify({ protocolVersion: '0.3', fleetId: 'fleet-a', name: 'Agent A', url: 'https://fleet.invalid/a', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2'] }));
     await writeFile(privatePath, JSON.stringify(keys.privateKey.export({ format: 'jwk' })), { mode: 0o600 }); await chmod(privatePath, 0o644);
-    await expect(signedCardForParticipant(participant, { AGENT_ROOM_AGENT_CARD: cardPath, AGENT_ROOM_FLEET_PRIVATE_KEY: privatePath, AGENT_ROOM_FLEET_KEY_ID: 'key-a' })).rejects.toMatchObject({ name: 'agent_identity_configuration_invalid' });
+    const env = { AGENT_ROOM_AGENT_CARD: cardPath, AGENT_ROOM_FLEET_PRIVATE_KEY: privatePath, AGENT_ROOM_FLEET_KEY_ID: 'key-a' };
+    await expect(signedCardForParticipant(participant, env)).rejects.toMatchObject({
+      name: 'agent_private_key_permissions_invalid', code: 'agent_private_key_permissions_invalid',
+    });
+    await writeFile(privatePath, '{', { mode: 0o600 }); await chmod(privatePath, 0o600);
+    await expect(signedCardForParticipant(participant, env)).rejects.toMatchObject({
+      name: 'agent_identity_configuration_invalid', code: 'agent_identity_configuration_invalid',
+    });
+    await writeFile(privatePath, JSON.stringify(keys.privateKey.export({ format: 'jwk' })), { mode: 0o600 });
+    await expect(signedCardForParticipant(participant, env)).resolves.toMatchObject({ scheme: 'oauth2' });
   });
 
   it('drives room_create and fresh room_join with signed cards and no pre-join read', async () => {

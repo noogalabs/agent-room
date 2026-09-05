@@ -38,6 +38,12 @@ function memoryRecords(initial = room()) {
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
     createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
+    deleteRoomIfVersion: vi.fn(async (code: string, version: number) => {
+      if (code !== current.code || version !== current.version) return false;
+      current = { ...current, code: '__deleted__' };
+      receipts.splice(0);
+      return true;
+    }),
     updateRoom: vi.fn(async (_code: string, version: number, next: Room) => { if (version !== current.version) return false; current = structuredClone(next); return true; }),
     updateRoomAndDeleteReceipt: vi.fn(async (_code: string, version: number, next: Room, id: string) => {
       if (refuseAtomicRemoval || version !== current.version) return false;
@@ -89,7 +95,7 @@ function memoryRecords(initial = room()) {
   } as unknown as RoomRecordServer;
   return { records, current: () => current, receipts: () => structuredClone(receipts),
     refuseAtomicRemoval: () => { refuseAtomicRemoval = true; },
-    refuseAtomicJoin: () => { refuseAtomicJoin = true; }, trustKeys: () => structuredClone(trustKeys) };
+    refuseAtomicJoin: (value = true) => { refuseAtomicJoin = value; }, trustKeys: () => structuredClone(trustKeys) };
 }
 
 function hostedEnv(path: string, extra: Record<string, string | undefined> = {}) {
@@ -556,6 +562,30 @@ describe('hosted room production entry', () => {
     const action = await fetch(`${base}/api/rooms/WEB01/actions`, { method: 'POST', headers: { authorization: `Bearer ${created.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'system-message', message: forged }) });
     expect(action.status).toBe(200);
     expect(memory.records.appendMessage).toHaveBeenCalledWith('WEB01', { id: 3, type: 'sys', name: 'David', role: 'host', initials: 'DH', color: '#123456', client: 'web', text: 'host note', time: 3, attachments: undefined });
+  });
+
+  it('rolls back browser room creation when the creator join fails so the same name can retry', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'RETRY1' }),
+    })).json() as { token: string };
+    const create = () => fetch(`${base}/api/browser-rooms`, {
+      method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'RETRY1', topic: 'retry', name: 'Same Host', role: 'host', color: '#123456', initials: 'SH' }),
+    });
+
+    memory.refuseAtomicJoin();
+    expect(await (await create()).json()).toStrictEqual({ error: 'room_version_conflict' });
+    expect(await memory.records.getRoom('RETRY1')).toBeNull();
+    expect(memory.receipts()).toStrictEqual([]);
+
+    memory.refuseAtomicJoin(false);
+    const retried = await create();
+    expect(retried.status).toBe(201);
+    expect((await retried.json() as { participant: Room['participants'][number] }).participant.name).toBe('Same Host');
   });
 
   it('keeps a room-lifetime human invite reusable, revokes only future joins, refreshes presence, and frees a seat on leave', async () => {
@@ -1087,6 +1117,30 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
       expect(await hosted.rooms.listReceipts(code)).toStrictEqual(beforeReceipts);
     } finally { await restore(); }
   }
+
+  it('removes a newly created browser room when its real Postgres creator join fails', async () => {
+    const code = `BC${Date.now()}`; const trust = await trustFile();
+    const hosted = await createHostedRoomServer(hostedEnv(trust.path, {
+      AGENT_ROOM_PERSISTENCE: 'postgres', AGENT_ROOM_DATABASE_URL: postgresUrl,
+    }));
+    const base = await listenHosted(hosted);
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code }),
+    })).json() as { token: string };
+    const create = () => fetch(`${base}/api/browser-rooms`, {
+      method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code, topic: 'retry', name: 'Same Host', role: 'host', color: '#123456', initials: 'SH' }),
+    });
+    const restore = await rejectReceiptAppendFor(code);
+    try {
+      expect((await create()).status).toBe(400);
+      expect(await hosted.rooms.getRoom(code)).toBeNull();
+      expect(await hosted.rooms.listReceipts(code)).toStrictEqual([]);
+    } finally { await restore(); }
+    expect((await create()).status).toBe(201);
+    expect((await hosted.rooms.getRoom(code))?.participants.map(item => item.name)).toStrictEqual(['Same Host']);
+  });
 
   it('rolls back human join when its real Postgres roster-receipt append leg fails', async () => {
     const code = `HJ${Date.now()}`; const { base, hosted } = await postgresHosted(code);

@@ -214,9 +214,14 @@ export async function createHostedRoomServer(
         humans.verifyCreator(bearer(req) ?? '', input.code);
         const room: Room = { code: input.code, topic: input.topic.trim(), createdBy: input.name.trim(), createdAt: Date.now(), status: 'active', version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
         await createRoomExclusive(room);
-        const invite = await humans.issueInvite(room.code);
-        const joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
-        return reply(res, 201, { room: await rooms.getRoom(room.code), ...joined });
+        try {
+          const invite = await humans.issueInvite(room.code);
+          const joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
+          return reply(res, 201, { room: await rooms.getRoom(room.code), ...joined });
+        } catch (error) {
+          await rooms.deleteRoomIfVersion(room.code, room.version);
+          throw error;
+        }
       }
       const inviteMatch = /^\/api\/rooms\/([^/]+)\/human-invites(?:\/([^/]+))?$/.exec(url.pathname);
       if (inviteMatch) {

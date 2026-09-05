@@ -79,6 +79,14 @@ export class PostgresRoomPersistence implements RoomPersistence {
     }
   }
 
+  async deleteRoomIfVersion(code: string, expectedVersion: number): Promise<boolean> {
+    const result = await this.pool.query(
+      'DELETE FROM agent_room_rooms WHERE code = $1 AND version = $2',
+      [code, expectedVersion],
+    );
+    return result.rowCount === 1;
+  }
+
   async getRoom(code: string): Promise<Room | null> {
     const result = await this.pool.query<{ room_json: unknown }>(
       'SELECT room_json FROM agent_room_rooms WHERE code = $1',
