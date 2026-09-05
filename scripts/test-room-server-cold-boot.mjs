@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process';
+import { generateKeyPairSync } from 'node:crypto';
 import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import pg from 'pg';
+import { signAgentCard } from '../packages/room-persistence/dist/index.js';
 
 const databaseUrl = process.env.TEST_POSTGRES_URL;
 if (!databaseUrl) throw new Error('TEST_POSTGRES_URL is required');
@@ -25,7 +27,7 @@ async function reset() {
   }
 }
 
-async function runColdBoot(label, arrange, seedEnv = {}) {
+async function runColdBoot(label, arrange, expectedTrustKeyCount, seedEnv = {}, verify = async () => {}) {
   await reset();
   await arrange();
   const runtime = await mkdtemp(resolve(tmpdir(), 'agent-room-cold-boot-'));
@@ -61,12 +63,12 @@ async function runColdBoot(label, arrange, seedEnv = {}) {
       await new Promise(resolveDelay => setTimeout(resolveDelay, 250));
     }
     if (!health) throw new Error(`${label} never became healthy:\n${output}`);
-    if (health.ready !== true || health.trustKeyCount !== 0 || health.persistence !== 'postgres') {
+    if (health.ready !== true || health.trustKeyCount !== expectedTrustKeyCount || health.persistence !== 'postgres') {
       throw new Error(`${label} returned unexpected health: ${JSON.stringify(health)}`);
     }
     const schema = await pool.query('SELECT MAX(version)::int AS version FROM agent_room_schema_migrations');
     if (schema.rows[0]?.version !== 2) throw new Error(`${label} did not migrate to schema v2`);
-    if (!output.includes('agent_room_trust_store_empty')) {
+    if (expectedTrustKeyCount === 0 && !output.includes('agent_room_trust_store_empty')) {
       throw new Error(`${label} omitted the loud zero-trust startup log`);
     }
     if (seedEnv.AGENT_ROOM_TRUST_STORE_B64 || seedEnv.AGENT_ROOM_TRUST_STORE_JSON) {
@@ -75,13 +77,36 @@ async function runColdBoot(label, arrange, seedEnv = {}) {
         throw new Error(`${label} materialized trust seed with group/other permissions`);
       }
     }
-    process.stdout.write(`${label}: healthy at schema v2 with zero trusted fleets\n`);
+    await verify(`http://127.0.0.1:${port}`);
+    process.stdout.write(`${label}: healthy at schema v2 with ${expectedTrustKeyCount} trusted fleet key(s)\n`);
   } finally {
     if (child.pid) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch {}
     }
     await rm(runtime, { recursive: true, force: true });
   }
+}
+
+async function rejectConflictingSources() {
+  const collisions = [
+    ['AGENT_ROOM_TRUST_STORE_B64', 'AGENT_ROOM_TRUST_STORE_JSON'],
+    ['AGENT_ROOM_TRUST_STORE_B64', 'AGENT_ROOM_TRUST_STORE'],
+    ['AGENT_ROOM_TRUST_STORE_JSON', 'AGENT_ROOM_TRUST_STORE'],
+  ];
+  for (const [left, right] of collisions) {
+    const child = spawn('sh', ['scripts/start-room-server.sh'], {
+      cwd: root,
+      env: { ...process.env, [left]: 'configured', [right]: 'configured' },
+    });
+    let output = '';
+    child.stdout.on('data', chunk => { output += chunk; });
+    child.stderr.on('data', chunk => { output += chunk; });
+    const code = await new Promise(resolveExit => child.once('exit', resolveExit));
+    if (code === 0 || !output.includes(left) || !output.includes(right)) {
+      throw new Error(`conflicting sources ${left}/${right} were not refused by name:\n${output}`);
+    }
+  }
+  process.stdout.write('conflicting seed sources: all three pairs refused by name\n');
 }
 
 async function rejectMalformedSeed() {
@@ -124,10 +149,43 @@ async function rejectMalformedSeed() {
 }
 
 try {
-  await runColdBoot('empty database', async () => {});
-  await runColdBoot('previous schema', async () => { await pool.query(v1); }, {
+  await runColdBoot('empty database', async () => {}, 0);
+  await runColdBoot('previous schema', async () => { await pool.query(v1); }, 0, {
     AGENT_ROOM_TRUST_STORE_B64: Buffer.from('[]').toString('base64'),
   });
+  const syntheticKeys = generateKeyPairSync('ed25519');
+  const syntheticTrust = [{
+    fleetId: 'cold-boot-fleet',
+    keyId: 'cold-boot-key',
+    publicKey: syntheticKeys.publicKey.export({ format: 'jwk' }),
+  }];
+  await runColdBoot('populated base64 seed', async () => {}, 1, {
+    AGENT_ROOM_TRUST_STORE_B64: Buffer.from(JSON.stringify(syntheticTrust)).toString('base64'),
+  }, async base => {
+    const room = {
+      code: 'COLD01', topic: 'cold boot', createdAt: Date.now(), createdBy: 'host', status: 'active', version: 1,
+      participants: [], acceptedMemberAuthSchemes: ['oauth2'],
+    };
+    const created = await fetch(`${base}/api/rooms`, {
+      method: 'POST',
+      headers: { authorization: 'Bearer cold-boot-host-token-0000000000000000000000', 'content-type': 'application/json' },
+      body: JSON.stringify(room),
+    });
+    if (created.status !== 201) throw new Error(`populated seed could not create room: ${created.status} ${await created.text()}`);
+    const card = {
+      protocolVersion: '0.3', fleetId: 'cold-boot-fleet', name: 'Cold Boot Agent',
+      url: 'https://cold-boot.invalid/agent', version: '1', securitySchemes: { oauth2: {} }, security: ['oauth2'],
+    };
+    const joined = await fetch(`${base}/api/rooms/COLD01/join`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        participant: { name: card.name, role: '', color: '#000000', initials: 'CB', client: 'cc' },
+        signedCard: signAgentCard(card, 'cold-boot-key', syntheticKeys.privateKey), scheme: 'oauth2',
+      }),
+    });
+    if (joined.status !== 200) throw new Error(`matching synthetic signed card did not join: ${joined.status} ${await joined.text()}`);
+  });
+  await rejectConflictingSources();
   await rejectMalformedSeed();
 } finally {
   await reset();

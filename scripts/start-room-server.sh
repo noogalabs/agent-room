@@ -1,13 +1,21 @@
 #!/bin/sh
 set -eu
+umask 077
 
 if [ -n "${AGENT_ROOM_TRUST_STORE_B64:-}" ] && [ -n "${AGENT_ROOM_TRUST_STORE_JSON:-}" ]; then
-  echo "trust_store_configuration_invalid: set only one of AGENT_ROOM_TRUST_STORE_B64 or AGENT_ROOM_TRUST_STORE_JSON" >&2
+  echo "trust_store_configuration_invalid: AGENT_ROOM_TRUST_STORE_B64 and AGENT_ROOM_TRUST_STORE_JSON are mutually exclusive" >&2
+  exit 1
+fi
+if [ -n "${AGENT_ROOM_TRUST_STORE_B64:-}" ] && [ -n "${AGENT_ROOM_TRUST_STORE:-}" ]; then
+  echo "trust_store_configuration_invalid: AGENT_ROOM_TRUST_STORE_B64 and AGENT_ROOM_TRUST_STORE are mutually exclusive" >&2
+  exit 1
+fi
+if [ -n "${AGENT_ROOM_TRUST_STORE_JSON:-}" ] && [ -n "${AGENT_ROOM_TRUST_STORE:-}" ]; then
+  echo "trust_store_configuration_invalid: AGENT_ROOM_TRUST_STORE_JSON and AGENT_ROOM_TRUST_STORE are mutually exclusive" >&2
   exit 1
 fi
 
 if [ -n "${AGENT_ROOM_TRUST_STORE_B64:-}" ] || [ -n "${AGENT_ROOM_TRUST_STORE_JSON:-}" ]; then
-  umask 077
   AGENT_ROOM_TRUST_STORE="${TMPDIR:-/tmp}/agent-room-trust-store.json"
   if [ -n "${AGENT_ROOM_TRUST_STORE_B64:-}" ]; then
     printf '%s' "$AGENT_ROOM_TRUST_STORE_B64" | base64 -d > "$AGENT_ROOM_TRUST_STORE"
