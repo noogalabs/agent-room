@@ -68,8 +68,7 @@ path for durable, authenticated work:
   message or host authority.
 
 These additions are part of the public repository. Deployers provide their own
-database, signing keys, trust configuration, and service URL; this repository
-does not include an active deployment's credentials or trust anchors.
+database, signing keys, trust configuration, and service URL.
 
 ---
 
