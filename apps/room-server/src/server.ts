@@ -221,12 +221,14 @@ export async function createHostedRoomServer(
           joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
         } catch (caught) {
           if (!await rooms.deleteRoomIfVersion(room.code, room.version)) {
-            console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: room.version, cause: caught });
-            throw new HumanSessionError('browser_room_rollback_failed');
+            const failure = new HumanSessionError('browser_room_rollback_failed', { cause: caught });
+            console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: room.version, cause: caught, failure });
+            throw failure;
           }
           if (!(caught instanceof HumanSessionError)) {
-            console.error('browser_room_create_failed', { roomCode: room.code, cause: caught });
-            throw new HumanSessionError('browser_room_create_failed');
+            const failure = new HumanSessionError('browser_room_create_failed', { cause: caught });
+            console.error('browser_room_create_failed', { roomCode: room.code, cause: caught, failure });
+            throw failure;
           }
           throw caught;
         }
