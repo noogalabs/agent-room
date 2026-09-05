@@ -361,7 +361,7 @@ export async function createHostedRoomServer(
         const room = await rooms.getRoom(code);
         const member = resolveSessionParticipant(room, session);
         const message = canonicalHumanMessage(member, supplied);
-        return reply(res, 201, { sequence: await rooms.appendMessage(code, message) });
+        return reply(res, 201, { sequence: await rooms.appendMessage(code, message), message });
       }
       if (req.method === 'GET' && action === 'messages') { await authorizeRead(req, url, code); return reply(res, 200, await rooms.listMessages(code, Number(url.searchParams.get('from') ?? 0))); }
       reply(res, 405, { error: 'method_not_allowed' });

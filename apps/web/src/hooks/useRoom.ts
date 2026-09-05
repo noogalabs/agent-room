@@ -14,6 +14,33 @@ interface UseRoomState {
   error: string | null;
 }
 
+export function reconcileCanonicalMessage(messages: Message[], canonical: Message): Message[] {
+  return messages.map(message => message.id === canonical.id ? canonical : message);
+}
+
+export async function sendHostedOptimistically(
+  msg: Message,
+  update: (change: (state: UseRoomState) => UseRoomState) => void,
+  append: (message: Message) => Promise<Message>,
+  pull: () => Promise<void>,
+): Promise<void> {
+  update(state => state.messages.some(message => message.id === msg.id) ? state : ({
+    ...state, messages: [...state.messages, msg],
+  }));
+  try {
+    const canonical = await append(msg);
+    update(state => ({
+      ...state, messages: reconcileCanonicalMessage(state.messages, canonical),
+    }));
+    await pull();
+  } catch (error) {
+    update(state => ({
+      ...state, messages: state.messages.filter(message => message.id !== msg.id),
+    }));
+    throw error;
+  }
+}
+
 export function useRoom(code: string, selfName: string, sessionToken = '') {
   const [state, setState] = useState<UseRoomState>({ room: null, messages: [], error: null });
   const cursor = useRef(0);
@@ -193,7 +220,7 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     };
   }, [code, selfName, pullRoom, pullMessages, forceRefresh]);
 
-  const sendMessage = useCallback(async (msg: Message) => {
+  const sendMessage = useCallback((msg: Message) => {
     // Optimistic render: add to local state IMMEDIATELY so the sender
     // sees their own message in the feed without waiting for the
     // round-trip to Upstash + the follow-up pullMessages. Without this,
@@ -204,25 +231,12 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     // Dedup safety: pullMessages will fetch this same msg back from
     // Redis (same id we just RPUSHed) and skip it via the Set-membership
     // dedup. So no duplicate render.
-    setState(s => {
-      if (s.messages.some(m => m.id === msg.id)) return s;
-      return { ...s, messages: [...s.messages, msg] };
-    });
-
-    try {
-      await appendHostedMessage(code, sessionToken, msg);
-      await pullMessages();
-    } catch (e) {
-      // Roll back the optimistic add — server didn't accept the message.
-      // The composer's catch in Room.tsx restores the draft text so the
-      // user can retry. This keeps state honest if the network failed
-      // or appendMessage rejected (e.g. host muted us).
-      setState(s => ({
-        ...s,
-        messages: s.messages.filter(m => m.id !== msg.id),
-      }));
-      throw e;
-    }
+    return sendHostedOptimistically(
+      msg,
+      setState,
+      message => appendHostedMessage(code, sessionToken, message),
+      pullMessages,
+    );
   }, [code, sessionToken, pullMessages]);
 
   return { ...state, sendMessage, refreshRoom: pullRoom, forceRefresh };
