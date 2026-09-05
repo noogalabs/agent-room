@@ -65,6 +65,8 @@ describeRedis('Redis production Lua version guards', () => {
     const before = await snapshot();
     expect(await evalScript(ROOM_CAS_SCRIPT, [roomKey], ['2', nextRoom])).toBe(0);
     expect(await snapshot()).toStrictEqual(before);
+    expect(await evalScript(ROOM_CAS_SCRIPT, [roomKey], ['3', nextRoom])).toBe(1);
+    expect(await snapshot()).toStrictEqual({ ...before, room: nextRoom });
   });
 
   it('refuses stale delete-receipt CAS before changing room or receipts', async () => {
@@ -72,6 +74,9 @@ describeRedis('Redis production Lua version guards', () => {
     expect(await evalScript(ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT,
       [roomKey, receiptsKey, receiptIdsKey], ['2', nextRoom, 'receipt-old'])).toBe(0);
     expect(await snapshot()).toStrictEqual(before);
+    expect(await evalScript(ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT,
+      [roomKey, receiptsKey, receiptIdsKey], ['3', nextRoom, 'receipt-old'])).toBe(1);
+    expect(await snapshot()).toStrictEqual({ room: nextRoom, receipts: [], receiptIds: [] });
   });
 
   it('refuses stale replace-receipt CAS before changing room or receipts', async () => {
@@ -80,6 +85,10 @@ describeRedis('Redis production Lua version guards', () => {
       [roomKey, receiptsKey, receiptIdsKey],
       ['2', nextRoom, 'receipt-new', replacement, 'receipt-old', '4102444800'])).toBe(0);
     expect(await snapshot()).toStrictEqual(before);
+    expect(await evalScript(ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT,
+      [roomKey, receiptsKey, receiptIdsKey],
+      ['3', nextRoom, 'receipt-new', replacement, 'receipt-old', '4102444800'])).toBe(1);
+    expect(await snapshot()).toStrictEqual({ room: nextRoom, receipts: [replacement], receiptIds: ['receipt-new'] });
   });
 
   it('refuses stale multi-receipt CAS before changing room or receipts', async () => {
@@ -88,5 +97,12 @@ describeRedis('Redis production Lua version guards', () => {
       [roomKey, receiptsKey, receiptIdsKey],
       ['2', nextRoom, JSON.stringify(['receipt-old']), JSON.stringify([JSON.parse(replacement)]), '4102444800'])).toBe(0);
     expect(await snapshot()).toStrictEqual(before);
+    expect(await evalScript(ROOM_CAS_AND_RECEIPTS_SCRIPT,
+      [roomKey, receiptsKey, receiptIdsKey],
+      ['3', nextRoom, JSON.stringify(['receipt-old']), JSON.stringify([JSON.parse(replacement)]), '4102444800'])).toBe(1);
+    const after = await snapshot();
+    expect(after.room).toBe(nextRoom);
+    expect(after.receipts.map(row => JSON.parse(row))).toStrictEqual([JSON.parse(replacement)]);
+    expect(after.receiptIds).toStrictEqual(['receipt-new']);
   });
 });
