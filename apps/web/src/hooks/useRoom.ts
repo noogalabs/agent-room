@@ -14,6 +14,10 @@ interface UseRoomState {
   error: string | null;
 }
 
+export function reconcileCanonicalMessage(messages: Message[], canonical: Message): Message[] {
+  return messages.map(message => message.id === canonical.id ? canonical : message);
+}
+
 export function useRoom(code: string, selfName: string, sessionToken = '') {
   const [state, setState] = useState<UseRoomState>({ room: null, messages: [], error: null });
   const cursor = useRef(0);
@@ -210,7 +214,8 @@ export function useRoom(code: string, selfName: string, sessionToken = '') {
     });
 
     try {
-      await appendHostedMessage(code, sessionToken, msg);
+      const canonical = await appendHostedMessage(code, sessionToken, msg);
+      setState(s => ({ ...s, messages: reconcileCanonicalMessage(s.messages, canonical) }));
       await pullMessages();
     } catch (e) {
       // Roll back the optimistic add — server didn't accept the message.

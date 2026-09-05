@@ -28,11 +28,12 @@ export function listHostedMessages(code: string, from: number, token: string): P
   return request(`/api/rooms/${encodeURIComponent(code)}/messages?from=${from}`, { headers: readHeaders(token) });
 }
 
-export async function appendHostedMessage(code: string, token: string, message: Message): Promise<void> {
-  await request(`/api/rooms/${encodeURIComponent(code)}/messages`, {
+export async function appendHostedMessage(code: string, token: string, message: Message): Promise<Message> {
+  const result = await request<{ sequence: number; message: Message }>(`/api/rooms/${encodeURIComponent(code)}/messages`, {
     method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify(message),
   });
+  return result.message;
 }
 
 export function exchangeHumanInvite(code: string, inviteToken: string, input: { name: string; role: string; color: string; initials: string }) {

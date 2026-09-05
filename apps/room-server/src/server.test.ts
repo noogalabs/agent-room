@@ -312,7 +312,9 @@ describe('hosted room production entry', () => {
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, name: 'Agent A', client: 'cc' }) });
     expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, role: 'agent' }) });
-    expect(response.status).toBe(201); expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', { ...message, role: 'human' });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toStrictEqual({ sequence: 1, message: { ...message, role: 'human' } });
+    expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', { ...message, role: 'human' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...message, type: 'sys', role: 'host', metadata: { roleAtSend: 'host_directed' } }) });
     expect(await response.json()).toStrictEqual({ error: 'human_identity_mismatch' });
     response = await fetch(`${base}/api/rooms/ROOM1/messages`, { method: 'POST', headers: { authorization: `Bearer ${session.token}`, 'content-type': 'application/json' }, body: JSON.stringify(message) });
