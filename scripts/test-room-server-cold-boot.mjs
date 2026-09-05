@@ -76,7 +76,7 @@ async function runColdBoot(label, arrange, expectedTrustKeyCount, seedEnv = {}, 
       throw new Error(`${label} returned unexpected health: ${JSON.stringify(health)}`);
     }
     const schema = await pool.query('SELECT MAX(version)::int AS version FROM agent_room_schema_migrations');
-    if (schema.rows[0]?.version !== 2) throw new Error(`${label} did not migrate to schema v2`);
+    if (schema.rows[0]?.version !== 3) throw new Error(`${label} did not migrate to schema v3`);
     if (expectedTrustKeyCount === 0 && !output.includes('agent_room_trust_store_empty')) {
       throw new Error(`${label} omitted the loud zero-trust startup log`);
     }
@@ -87,7 +87,7 @@ async function runColdBoot(label, arrange, expectedTrustKeyCount, seedEnv = {}, 
       }
     }
     await verify(`http://127.0.0.1:${port}`);
-    process.stdout.write(`${label}: healthy at schema v2 with ${expectedTrustKeyCount} trusted fleet key(s)\n`);
+    process.stdout.write(`${label}: healthy at schema v3 with ${expectedTrustKeyCount} trusted fleet key(s)\n`);
   } finally {
     if (child.pid) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch {}

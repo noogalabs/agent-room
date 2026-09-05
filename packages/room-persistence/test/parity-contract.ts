@@ -104,7 +104,7 @@ export async function proveAtomicRoomReceiptParity(
     initial.code, version3.version, version4, [legacy.id], [replacement],
   )).toBe(true);
   expect(await store.getRoom(initial.code)).toEqual(version4);
-  expect(await store.listReceipts(initial.code)).toEqual([replacement, unrelated]);
+  expect(await store.listReceipts(initial.code)).toEqual([unrelated, replacement]);
   expect(await store.deleteReceipt(initial.code, unrelated.id)).toBe(true);
   expect(await store.deleteReceipt(initial.code, unrelated.id)).toBe(false);
   expect(await store.listReceipts(initial.code)).toEqual([replacement]);
