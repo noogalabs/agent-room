@@ -430,6 +430,11 @@ describe('hosted room production entry', () => {
           body: JSON.stringify({ participant: { name: seat.name, role: '', color: '#000000', initials: 'AA', client: seat.client }, signedCard: signAgentCard(card, 'key-a', trust.privateKey), scheme: 'oauth2' }),
         })).json() as { participantToken: string }).participantToken;
       }
+      const beforeRemoval = await fetch(`${base}/api/room`, {
+        method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ action: 'get', code: 'ROOM1' }),
+      });
+      expect([seat.kind, beforeRemoval.status]).toStrictEqual([seat.kind, 200]);
       expect((await fetch(`${base}/api/rooms/ROOM1/actions`, {
         method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
         body: JSON.stringify({ action: 'remove', targetName: seat.name, targetClient: seat.client }),
