@@ -5,7 +5,7 @@ import { Pool } from 'pg';
 import { RoomRecordServer } from '../src/server.js';
 import { PostgresRoomPersistence } from '../src/postgres.js';
 import { PersistenceSchemaError, type RoomReceipt } from '../src/types.js';
-import { proveImmutableRecordParity } from './parity-contract.js';
+import { proveAtomicRoomReceiptParity, proveImmutableRecordParity } from './parity-contract.js';
 import { AgentCardVerifier, AuthenticatedRoomJoinServer, signAgentCard } from '../src/member-auth.js';
 import { TaskLeaseServer } from '../src/task-leases.js';
 
@@ -90,6 +90,12 @@ describePostgres('Postgres durable room production entry', () => {
       createdAt: 1_700_000_000_450, payload: { disposition: 'accepted' },
     };
     await proveImmutableRecordParity(first.persistence, parityRoom, parityReport, parityReceipt);
+  });
+
+  it('matches the Redis atomic room and receipt mutation contract', async () => {
+    await proveAtomicRoomReceiptParity(first.persistence, {
+      ...room(), code: 'PGS-ATM-PTY', topic: 'Synthetic atomic parity room', participants: [],
+    });
   });
 
   it('keeps fleet trust keys across server restarts and removes only the selected key', async () => {
