@@ -98,21 +98,33 @@ async function runColdBoot(label, arrange, expectedTrustKeyCount, seedEnv = {}, 
 
 async function rejectConflictingSources() {
   const collisions = [
-    ['AGENT_ROOM_TRUST_STORE_B64', 'AGENT_ROOM_TRUST_STORE_JSON'],
-    ['AGENT_ROOM_TRUST_STORE_B64', 'AGENT_ROOM_TRUST_STORE'],
-    ['AGENT_ROOM_TRUST_STORE_JSON', 'AGENT_ROOM_TRUST_STORE'],
+    ['AGENT_ROOM_TRUST_STORE_B64', 'AGENT_ROOM_TRUST_STORE_JSON', 'trust_store_configuration_invalid: AGENT_ROOM_TRUST_STORE_B64 and AGENT_ROOM_TRUST_STORE_JSON are mutually exclusive\n'],
+    ['AGENT_ROOM_TRUST_STORE_B64', 'AGENT_ROOM_TRUST_STORE', 'trust_store_configuration_invalid: AGENT_ROOM_TRUST_STORE_B64 and AGENT_ROOM_TRUST_STORE are mutually exclusive\n'],
+    ['AGENT_ROOM_TRUST_STORE_JSON', 'AGENT_ROOM_TRUST_STORE', 'trust_store_configuration_invalid: AGENT_ROOM_TRUST_STORE_JSON and AGENT_ROOM_TRUST_STORE are mutually exclusive\n'],
   ];
-  for (const [left, right] of collisions) {
+  for (const [left, right, expectedOutput] of collisions) {
+    const runtime = await mkdtemp(resolve(tmpdir(), 'agent-room-conflicting-seeds-'));
     const child = spawn('sh', ['scripts/start-room-server.sh'], {
       cwd: root,
-      env: { ...process.env, [left]: 'configured', [right]: 'configured' },
+      env: { ...process.env, TMPDIR: runtime, [left]: 'configured', [right]: 'configured' },
     });
     let output = '';
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
-    const code = await new Promise(resolveExit => child.once('close', resolveExit));
-    if (code === 0 || !output.includes(left) || !output.includes(right)) {
-      throw new Error(`conflicting sources ${left}/${right} were not refused by name:\n${output}`);
+    try {
+      const code = await new Promise((resolveExit, rejectExit) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGTERM');
+          rejectExit(new Error(`conflicting sources ${left}/${right} did not fail promptly`));
+        }, 10000);
+        child.once('close', value => { clearTimeout(timer); resolveExit(value); });
+      });
+      if (code === 0 || output !== expectedOutput) {
+        throw new Error(`conflicting sources ${left}/${right} returned code ${code}; expected ${JSON.stringify(expectedOutput)}, received ${JSON.stringify(output)}`);
+      }
+    } finally {
+      if (child.exitCode === null) child.kill('SIGTERM');
+      await rm(runtime, { recursive: true, force: true });
     }
   }
   process.stdout.write('conflicting seed sources: all three pairs refused by name\n');
@@ -144,11 +156,11 @@ async function rejectMalformedSeed() {
       child.kill('SIGTERM');
       rejectExit(new Error('malformed seed did not fail promptly'));
     }, 10000);
-    child.once('exit', value => { clearTimeout(timer); resolveExit(value); });
+    child.once('close', value => { clearTimeout(timer); resolveExit(value); });
   });
   try {
     if (code === 0 || !output.includes('trust_store_invalid')) {
-      throw new Error(`malformed supplied seed did not fail loudly:\n${output}`);
+      throw new Error(`malformed supplied seed returned code ${code} without trust_store_invalid:\n${output}`);
     }
     const materialized = await materializedTrustStore(runtime);
     if ((await stat(materialized)).mode & 0o077) {
