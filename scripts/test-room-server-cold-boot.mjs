@@ -172,6 +172,37 @@ async function rejectMalformedSeed() {
   }
 }
 
+async function rejectMalformedBase64Seed() {
+  const runtime = await mkdtemp(resolve(tmpdir(), 'agent-room-bad-base64-seed-'));
+  const child = spawn('sh', ['scripts/start-room-server.sh'], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AGENT_ROOM_TRUST_STORE_B64: '%%%not-base64%%%',
+      TMPDIR: runtime,
+    },
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  const code = await new Promise((resolveExit, rejectExit) => {
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      rejectExit(new Error('malformed base64 seed did not fail promptly'));
+    }, 10000);
+    child.once('close', value => { clearTimeout(timer); resolveExit(value); });
+  });
+  try {
+    if (code === 0 || !/base64.*(?:invalid|error decoding)/is.test(output) || output.includes('trust_store_invalid')) {
+      throw new Error(`malformed base64 seed did not fail in the decoder (code ${code}):\n${output}`);
+    }
+    process.stdout.write('malformed base64 seed: decoder failure stopped startup before validation\n');
+  } finally {
+    if (child.exitCode === null) child.kill('SIGTERM');
+    await rm(runtime, { recursive: true, force: true });
+  }
+}
+
 try {
   await runColdBoot('empty database', async () => {}, 0);
   await runColdBoot('previous schema', async () => { await pool.query(v1); }, 0, {
@@ -211,6 +242,7 @@ try {
   });
   await rejectConflictingSources();
   await rejectMalformedSeed();
+  await rejectMalformedBase64Seed();
 } finally {
   await reset();
   await pool.end();
