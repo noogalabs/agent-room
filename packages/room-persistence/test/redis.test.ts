@@ -5,7 +5,7 @@ import { RoomRecordServer } from '../src/server.js';
 import { RedisRoomPersistence } from '../src/redis.js';
 import { TaskLeaseServer, type LeaseActor } from '../src/task-leases.js';
 import type { RoomReceipt } from '../src/types.js';
-import { proveImmutableRecordParity } from './parity-contract.js';
+import { proveAtomicRoomReceiptParity, proveImmutableRecordParity } from './parity-contract.js';
 
 class RecordingRedis implements UpstashClient {
   readonly commands: Array<readonly (string | number)[]> = [];
@@ -111,12 +111,65 @@ class StatefulRedis implements UpstashClient {
         this.lists.set(listKey, [...(this.lists.get(listKey) ?? []), payload]);
         return 1 as T;
       }
+      const roomKey = String(command[3]);
+      const listKey = String(command[4]);
+      const idsKey = String(command[5]);
+      const currentRaw = this.values.get(roomKey);
+      if (!currentRaw) return 0 as T;
+      const current = JSON.parse(currentRaw) as Room;
+      const expectedVersion = Number(command[6]);
+      if (current.version !== expectedVersion) return 0 as T;
+      const rows = this.lists.get(listKey) ?? [];
+      const hasReceipt = (id: string) => this.receiptIds.has(`${idsKey}:${id}`);
+      const removeReceipt = (id: string) => {
+        const index = rows.findIndex(row => (JSON.parse(row) as RoomReceipt).id === id);
+        if (index < 0 || !hasReceipt(id)) return false;
+        rows.splice(index, 1); this.receiptIds.delete(`${idsKey}:${id}`); return true;
+      };
+      if (script.includes('receipt_row')) {
+        const id = String(command[8]);
+        if (!hasReceipt(id)) return 0 as T;
+        this.values.set(roomKey, String(command[7])); removeReceipt(id);
+        this.lists.set(listKey, rows); return 1 as T;
+      }
+      if (script.includes('legacy_row')) {
+        const appendId = String(command[8]); const payload = String(command[9]);
+        const deleteId = String(command[10]);
+        if (hasReceipt(appendId) || (deleteId && !hasReceipt(deleteId))) return 0 as T;
+        this.values.set(roomKey, String(command[7]));
+        if (deleteId) removeReceipt(deleteId);
+        this.receiptIds.add(`${idsKey}:${appendId}`); rows.push(payload);
+        this.lists.set(listKey, rows); return 1 as T;
+      }
+      if (script.includes('delete_rows')) {
+        const deletes = JSON.parse(String(command[8])) as string[];
+        const appends = JSON.parse(String(command[9])) as RoomReceipt[];
+        if (deletes.some(id => !hasReceipt(id)) || appends.some(item =>
+          !deletes.includes(item.id) && hasReceipt(item.id))) return 0 as T;
+        this.values.set(roomKey, String(command[7]));
+        deletes.forEach(removeReceipt);
+        for (const item of appends) {
+          this.receiptIds.add(`${idsKey}:${item.id}`); rows.push(JSON.stringify(item));
+        }
+        this.lists.set(listKey, rows); return 1 as T;
+      }
     }
     throw new Error(`Unsupported fake command ${String(name)}`);
   }
 
-  async pipeline<T>(_commands: readonly (readonly (string | number)[])[]): Promise<T[]> {
-    return [];
+  async pipeline<T>(commands: readonly (readonly (string | number)[])[]): Promise<T[]> {
+    return commands.map(command => {
+      if (command[0] === 'LREM') {
+        const rows = this.lists.get(String(command[1])) ?? [];
+        const index = rows.indexOf(String(command[3]));
+        if (index < 0) return 0 as T;
+        rows.splice(index, 1); return 1 as T;
+      }
+      if (command[0] === 'SREM') {
+        return Number(this.receiptIds.delete(`${String(command[1])}:${String(command[2])}`)) as T;
+      }
+      return 0 as T;
+    });
   }
 }
 
@@ -271,6 +324,13 @@ describe('RedisRoomPersistence compatibility', () => {
   it('matches the durable adapter collision contract for minutes and receipts', async () => {
     const store = new RedisRoomPersistence(new StatefulRedis());
     await proveImmutableRecordParity(store, room(), report(), receipt());
+  });
+
+  it('matches the durable adapter contract for atomic room and receipt mutations', async () => {
+    await proveAtomicRoomReceiptParity(
+      new RedisRoomPersistence(new StatefulRedis()),
+      { ...room(), code: 'RED-ATM-PTY' },
+    );
   });
 
   it('persists and selectively revokes fleet trust keys without a room TTL', async () => {
