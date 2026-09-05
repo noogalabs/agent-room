@@ -34,10 +34,17 @@ function memoryRecords(initial = room()) {
   let current = structuredClone(initial);
   let refuseAtomicRemoval = false;
   let refuseAtomicJoin = false;
+  let failCommittedRoomRead = false;
   const trustKeys: Array<{ fleetId: string; keyId: string; publicKey: Readonly<Record<string, unknown>> }> = [];
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
-    createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => code === current.code ? structuredClone(current) : null),
+    createRoom: vi.fn(async (value: Room) => { if (value.code === current.code) throw new Error(`Room ${value.code} already exists`); current = structuredClone(value); }), getRoom: vi.fn(async (code: string) => {
+      if (failCommittedRoomRead && code === current.code && current.version > 1) {
+        failCommittedRoomRead = false;
+        throw new Error('synthetic post-join room read failure');
+      }
+      return code === current.code ? structuredClone(current) : null;
+    }),
     deleteRoomIfVersion: vi.fn(async (code: string, version: number) => {
       if (code !== current.code || version !== current.version) return false;
       current = { ...current, code: '__deleted__' };
@@ -95,7 +102,8 @@ function memoryRecords(initial = room()) {
   } as unknown as RoomRecordServer;
   return { records, current: () => current, receipts: () => structuredClone(receipts),
     refuseAtomicRemoval: () => { refuseAtomicRemoval = true; },
-    refuseAtomicJoin: (value = true) => { refuseAtomicJoin = value; }, trustKeys: () => structuredClone(trustKeys) };
+    refuseAtomicJoin: (value = true) => { refuseAtomicJoin = value; },
+    failCommittedRoomRead: () => { failCommittedRoomRead = true; }, trustKeys: () => structuredClone(trustKeys) };
 }
 
 function hostedEnv(path: string, extra: Record<string, string | undefined> = {}) {
@@ -598,11 +606,36 @@ describe('hosted room production entry', () => {
     })).json() as { token: string };
     memory.refuseAtomicJoin();
     vi.mocked(memory.records.deleteRoomIfVersion).mockResolvedValueOnce(false);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     const response = await fetch(`${base}/api/browser-rooms`, {
       method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
       body: JSON.stringify({ code: 'LOUDRB', topic: 'rollback', name: 'Host', role: 'host', color: '#123456', initials: 'HO' }),
     });
     expect(await response.json()).toStrictEqual({ error: 'browser_room_rollback_failed' });
+    expect(logged).toHaveBeenCalledWith('browser_room_rollback_failed', expect.objectContaining({ roomCode: 'LOUDRB', expectedVersion: 1 }));
+  });
+
+  it('rolls back the committed creator join at its current version when the response re-read fails', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'POSTJOIN' }),
+    })).json() as { token: string };
+    const create = () => fetch(`${base}/api/browser-rooms`, {
+      method: 'POST', headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'POSTJOIN', topic: 'rollback after join', name: 'Same Host', role: 'host', color: '#123456', initials: 'SH' }),
+    });
+
+    memory.failCommittedRoomRead();
+    expect((await create()).status).toBe(500);
+    expect(await memory.records.getRoom('POSTJOIN')).toBeNull();
+    expect(memory.receipts()).toStrictEqual([]);
+
+    const retried = await create();
+    expect(retried.status).toBe(201);
+    expect((await retried.json() as { participant: Room['participants'][number] }).participant.name).toBe('Same Host');
   });
 
   it('keeps a room-lifetime human invite reusable, revokes only future joins, refreshes presence, and frees a seat on leave', async () => {
