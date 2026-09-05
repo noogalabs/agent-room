@@ -6,6 +6,7 @@ import {
   ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT,
   ROOM_CAS_AND_RECEIPTS_SCRIPT,
   ROOM_CAS_SCRIPT,
+  ROOM_DELETE_IF_VERSION_SCRIPT,
 } from '../src/redis.js';
 
 const redisUrl = process.env.TEST_REDIS_URL;
@@ -117,5 +118,20 @@ describeRedis('Redis production Lua version guards', () => {
     expect(after.room).toBe(nextRoom);
     expect(after.receipts.map(row => JSON.parse(row))).toStrictEqual([JSON.parse(replacement)]);
     expect(after.receiptIds).toStrictEqual(['receipt-new']);
+  });
+
+  it('refuses stale room deletion before changing room or receipts', async () => {
+    const before = await snapshot();
+    expect(await evalScript(ROOM_DELETE_IF_VERSION_SCRIPT,
+      [roomKey, `${keyPrefix}:messages`, `${keyPrefix}:message-count`, `${keyPrefix}:board`, receiptsKey, receiptIdsKey],
+      ['2'])).toBe(0);
+    expect(await snapshot()).toStrictEqual(before);
+  });
+
+  it('deletes a just-created room and its receipts at the current version', async () => {
+    expect(await evalScript(ROOM_DELETE_IF_VERSION_SCRIPT,
+      [roomKey, `${keyPrefix}:messages`, `${keyPrefix}:message-count`, `${keyPrefix}:board`, receiptsKey, receiptIdsKey],
+      ['3'])).toBe(1);
+    expect(await snapshot()).toStrictEqual({ room: null, receipts: [], receiptIds: [] });
   });
 });

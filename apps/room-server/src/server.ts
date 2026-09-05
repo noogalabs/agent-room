@@ -27,7 +27,8 @@ async function body(req: IncomingMessage): Promise<unknown> {
 
 function error(res: ServerResponse, value: unknown): void {
   const code = value instanceof MemberJoinError || value instanceof HumanSessionError || value instanceof TrustStoreError ? value.code : 'internal_error';
-  const status = code === 'room_not_found' ? 404 : code === 'internal_error' ? 500 : 400;
+  const status = code === 'room_not_found' ? 404 :
+    code === 'internal_error' || code === 'browser_room_create_failed' || code === 'browser_room_rollback_failed' ? 500 : 400;
   reply(res, status, { error: code });
 }
 
@@ -125,7 +126,7 @@ export async function createHostedRoomServer(
       [...(issued.redeemedReceipt ? [issued.redeemedReceipt] : []), rosterReceipt])) {
       throw new HumanSessionError('room_version_conflict');
     }
-    return { ...issued, participant };
+    return { ...issued, participant, committedRoom: next };
   };
   const server = createServer(async (req, res) => {
     try {
@@ -214,9 +215,23 @@ export async function createHostedRoomServer(
         humans.verifyCreator(bearer(req) ?? '', input.code);
         const room: Room = { code: input.code, topic: input.topic.trim(), createdBy: input.name.trim(), createdAt: Date.now(), status: 'active', version: 1, participants: [], acceptedMemberAuthSchemes: ['oauth2'] };
         await createRoomExclusive(room);
-        const invite = await humans.issueInvite(room.code);
-        const joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
-        return reply(res, 201, { room: await rooms.getRoom(room.code), ...joined });
+        let joined: Awaited<ReturnType<typeof addHuman>>;
+        try {
+          const invite = await humans.issueInvite(room.code);
+          joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
+        } catch (caught) {
+          if (!await rooms.deleteRoomIfVersion(room.code, room.version)) {
+            console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: room.version, cause: caught });
+            throw new HumanSessionError('browser_room_rollback_failed');
+          }
+          if (!(caught instanceof HumanSessionError)) {
+            console.error('browser_room_create_failed', { roomCode: room.code, cause: caught });
+            throw new HumanSessionError('browser_room_create_failed');
+          }
+          throw caught;
+        }
+        const { committedRoom, ...session } = joined;
+        return reply(res, 201, { room: committedRoom, ...session });
       }
       const inviteMatch = /^\/api\/rooms\/([^/]+)\/human-invites(?:\/([^/]+))?$/.exec(url.pathname);
       if (inviteMatch) {
@@ -234,7 +249,8 @@ export async function createHostedRoomServer(
       if (req.method === 'POST' && sessionMatch) {
         const code = decodeURIComponent(sessionMatch[1]!);
         const input = await body(req) as { inviteToken?: string; name?: string; role?: string; color?: string; initials?: string };
-        return reply(res, 200, await addHuman(code, { inviteToken: input.inviteToken ?? '', name: input.name ?? '', role: input.role, color: input.color, initials: input.initials }));
+        const { committedRoom: _committedRoom, ...session } = await addHuman(code, { inviteToken: input.inviteToken ?? '', name: input.name ?? '', role: input.role, color: input.color, initials: input.initials });
+        return reply(res, 200, session);
       }
       if (req.method === 'DELETE' && sessionMatch) {
         const code = decodeURIComponent(sessionMatch[1]!);

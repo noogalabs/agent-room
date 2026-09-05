@@ -299,6 +299,17 @@ describe('RedisRoomPersistence compatibility', () => {
     expect(await server.getRoom(room().code)).toBeNull();
   });
 
+  it('deletes a just-created Redis room only at its expected version', async () => {
+    const redis = new RecordingRedis();
+    const store = new RedisRoomPersistence(redis);
+    await expect(store.deleteRoomIfVersion(room().code, 1)).resolves.toBe(true);
+    expect(redis.commands[0]).toEqual([
+      'EVAL', expect.stringContaining('tonumber(ARGV[1])'), '6',
+      'room:ABC-DEF-GHJ', 'room-msgs:ABC-DEF-GHJ', 'room-msg-count:ABC-DEF-GHJ',
+      'task-board:ABC-DEF-GHJ', 'room-receipts:ABC-DEF-GHJ', 'room-receipt-ids:ABC-DEF-GHJ', '1',
+    ]);
+  });
+
   it('uses the existing message keys, trim cap, count, and creation-anchored expiry', async () => {
     const redis = new RecordingRedis();
     const store = new RedisRoomPersistence(redis);

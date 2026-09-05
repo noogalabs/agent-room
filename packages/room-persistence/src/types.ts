@@ -47,6 +47,7 @@ export interface RoomPersistence {
   readonly kind: PersistenceKind;
 
   createRoom(room: Room): Promise<void>;
+  deleteRoomIfVersion(code: string, expectedVersion: number): Promise<boolean>;
   getRoom(code: string): Promise<Room | null>;
   compareAndSwapRoom(code: string, expectedVersion: number, next: Room): Promise<boolean>;
   compareAndSwapRoomAndDeleteReceipt(

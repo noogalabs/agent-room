@@ -17,6 +17,9 @@ export class RoomRecordServer {
   }
 
   createRoom(room: Room): Promise<void> { return this.persistence.createRoom(room); }
+  deleteRoomIfVersion(code: string, expectedVersion: number): Promise<boolean> {
+    return this.persistence.deleteRoomIfVersion(code, expectedVersion);
+  }
   async getRoom(code: string): Promise<Room | null> {
     const room = await this.persistence.getRoom(code);
     if (!room) return null;

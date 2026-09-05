@@ -19,10 +19,14 @@ export async function signedCardForParticipant(
   let privateJwk: JsonWebKey;
   try {
     const keyStat = await stat(privateKeyPath);
-    if (!keyStat.isFile() || (keyStat.mode & 0o077) !== 0) throw new Error('unsafe private key permissions');
+    if (!keyStat.isFile()) throw new Error('private key path is not a file');
+    if ((keyStat.mode & 0o077) !== 0) throw new AgentIdentityConfigurationError('agent_private_key_permissions_invalid');
     card = JSON.parse(await readFile(cardPath, 'utf8')) as AgentCard;
     privateJwk = JSON.parse(await readFile(privateKeyPath, 'utf8')) as JsonWebKey;
-  } catch { throw new AgentIdentityConfigurationError('agent_identity_configuration_invalid'); }
+  } catch (error) {
+    if (error instanceof AgentIdentityConfigurationError) throw error;
+    throw new AgentIdentityConfigurationError('agent_identity_configuration_invalid');
+  }
   if (card.name !== participant.name) throw new AgentIdentityConfigurationError('agent_card_identity_mismatch');
   try {
     return { signedCard: signAgentCard(card, keyId, createPrivateKey({ key: privateJwk, format: 'jwk' })), scheme: 'oauth2' };

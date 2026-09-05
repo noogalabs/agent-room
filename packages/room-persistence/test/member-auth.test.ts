@@ -41,6 +41,7 @@ class MemoryPersistence implements RoomPersistence {
   current: Room = room();
   writes = 0;
   async createRoom(value: Room) { this.current = structuredClone(value); }
+  async deleteRoomIfVersion() { return false; }
   async getRoom(code: string) { return code === this.current.code ? structuredClone(this.current) : null; }
   async compareAndSwapRoom(_code: string, expected: number, next: Room) {
     if (this.current.version !== expected) return false;
