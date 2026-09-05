@@ -11,7 +11,7 @@ import { RoomRecordServer, signAgentCard } from '@agent-room/room-persistence';
 import type { Room } from '@agent-room/shared';
 import { createHostedRoomServer, startHostedRoomServer } from './server.js';
 import { loadStoredTrustStore } from './trust-store.js';
-import { HumanSessionAuthority } from './human-sessions.js';
+import { HumanSessionAuthority, HumanSessionError } from './human-sessions.js';
 
 const opened: Array<Awaited<ReturnType<typeof createHostedRoomServer>>> = [];
 const execFileAsync = promisify(execFile);
@@ -35,6 +35,7 @@ function memoryRecords(initial = room()) {
   let refuseAtomicRemoval = false;
   let refuseAtomicJoin = false;
   let failCommittedRoomRead = false;
+  let receiptAppendFailure: Error | undefined;
   const trustKeys: Array<{ fleetId: string; keyId: string; publicKey: Readonly<Record<string, unknown>> }> = [];
   const receipts: Array<{ id: string; roomCode: string; kind: 'receipt'; createdAt: number; payload: Readonly<Record<string, unknown>> }> = [];
   const records = {
@@ -81,7 +82,8 @@ function memoryRecords(initial = room()) {
       return true;
     }),
     appendMessage: vi.fn(async () => 1), listMessages: vi.fn(async () => []), close: vi.fn(),
-    appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
+    appendReceipt: vi.fn(async (value: typeof receipts[number]) => { if (receiptAppendFailure) throw receiptAppendFailure;
+      if (receipts.some(item => item.id === value.id)) return false; receipts.push(value); return true; }),
     deleteReceipt: vi.fn(async (_code: string, id: string) => {
       const index = receipts.findIndex(item => item.id === id);
       if (index < 0) return false;
@@ -103,6 +105,7 @@ function memoryRecords(initial = room()) {
   return { records, current: () => current, receipts: () => structuredClone(receipts),
     refuseAtomicRemoval: () => { refuseAtomicRemoval = true; },
     refuseAtomicJoin: (value = true) => { refuseAtomicJoin = value; },
+    failReceiptAppend: (failure: Error) => { receiptAppendFailure = failure; },
     failCommittedRoomRead: () => { failCommittedRoomRead = true; }, trustKeys: () => structuredClone(trustKeys) };
 }
 
@@ -615,6 +618,37 @@ describe('hosted room production entry', () => {
     expect(await response.json()).toStrictEqual({ error: 'browser_room_rollback_failed' });
     expect(logged).toHaveBeenCalledWith('browser_room_rollback_failed', expect.objectContaining({
       roomCode: 'LOUDRB', expectedVersion: 1, cause: expect.objectContaining({ code: 'room_version_conflict' }),
+      failure: expect.objectContaining({ code: 'browser_room_rollback_failed',
+        cause: expect.objectContaining({ code: 'room_version_conflict' }) }),
+    }));
+  });
+
+  it('preserves the original cause on both browser-room failure identities', () => {
+    const cause = new Error('persistence unavailable');
+    for (const code of ['browser_room_rollback_failed', 'browser_room_create_failed']) {
+      const failure = new HumanSessionError(code, { cause });
+      expect(failure).toMatchObject({ code, cause });
+    }
+  });
+
+  it('surfaces the original cause when browser room persistence fails', async () => {
+    const trust = await trustFile(); const memory = memoryRecords();
+    const cause = new Error('synthetic receipt persistence failure');
+    memory.failReceiptAppend(cause);
+    vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
+    const creator = await (await fetch(`${base}/api/browser-creator-invites`, {
+      method: 'POST', headers: { authorization: 'Bearer host-test-token', 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'CAUSE1' }),
+    })).json() as { token: string };
+    const response = await fetch(`${base}/api/browser-rooms`, { method: 'POST',
+      headers: { authorization: `Bearer ${creator.token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ code: 'CAUSE1', topic: 'cause', name: 'Host', role: 'host' }),
+    });
+    expect(response.status).toBe(500);
+    expect(logged).toHaveBeenCalledWith('browser_room_create_failed', expect.objectContaining({
+      cause, failure: expect.objectContaining({ code: 'browser_room_create_failed', cause }),
     }));
   });
 
@@ -1266,10 +1300,15 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
       body: JSON.stringify({ code, topic: 'retry', name: 'Same Host', role: 'host', color: '#123456', initials: 'SH' }),
     });
     const restore = await rejectReceiptAppendFor(code);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     try {
       const failed = await create();
       expect(failed.status).toBe(500);
       expect(await failed.json()).toStrictEqual({ error: 'browser_room_create_failed' });
+      expect(logged).toHaveBeenCalledWith('browser_room_create_failed', expect.objectContaining({
+        roomCode: code, cause: expect.any(Error),
+        failure: expect.objectContaining({ code: 'browser_room_create_failed', cause: expect.any(Error) }),
+      }));
       expect(await hosted.rooms.getRoom(code)).toBeNull();
       expect(await hosted.rooms.listReceipts(code)).toStrictEqual([]);
     } finally { await restore(); }

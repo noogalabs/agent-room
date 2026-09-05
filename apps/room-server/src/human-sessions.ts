@@ -3,7 +3,7 @@ import type { AuthenticatedMemberIdentity } from '@agent-room/shared';
 import type { RoomRecordServer, RoomReceipt } from '@agent-room/room-persistence';
 
 export class HumanSessionError extends Error {
-  constructor(readonly code: string) { super(code); this.name = code; }
+  constructor(readonly code: string, options?: ErrorOptions) { super(code, options); this.name = code; }
 }
 
 interface Capability {
