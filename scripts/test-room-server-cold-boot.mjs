@@ -101,7 +101,7 @@ async function rejectConflictingSources() {
     let output = '';
     child.stdout.on('data', chunk => { output += chunk; });
     child.stderr.on('data', chunk => { output += chunk; });
-    const code = await new Promise(resolveExit => child.once('exit', resolveExit));
+    const code = await new Promise(resolveExit => child.once('close', resolveExit));
     if (code === 0 || !output.includes(left) || !output.includes(right)) {
       throw new Error(`conflicting sources ${left}/${right} were not refused by name:\n${output}`);
     }
