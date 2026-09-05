@@ -365,7 +365,8 @@ export class RedisRoomPersistence implements RoomPersistence {
 
   async listReceipts(code: string): Promise<RoomReceipt[]> {
     const rows = await this.client.command<string[] | null>(['LRANGE', receiptsKey(code), 0, -1]);
-    return (rows ?? []).map(row => JSON.parse(row) as RoomReceipt);
+    return (rows ?? []).map(row => JSON.parse(row) as RoomReceipt)
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id));
   }
 
   async listFleetTrustKeys(): Promise<StoredFleetTrustKey[]> {

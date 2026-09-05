@@ -5,7 +5,7 @@ import { PersistenceSchemaError, type LeaseEventInput, type LeaseMembershipPreco
 import { sameJson } from './json.js';
 import { assertPostgresTargetAllowed } from './database-url.js';
 
-const REQUIRED_SCHEMA_VERSION = 3;
+const REQUIRED_SCHEMA_VERSION = 2;
 
 function value<T>(raw: unknown): T {
   return (typeof raw === 'string' ? JSON.parse(raw) : raw) as T;
@@ -383,7 +383,7 @@ export class PostgresRoomPersistence implements RoomPersistence {
   async listReceipts(code: string): Promise<RoomReceipt[]> {
     const result = await this.pool.query<{ receipt_json: unknown }>(
       `SELECT receipt_json FROM agent_room_receipts
-        WHERE room_code = $1 ORDER BY insertion_sequence ASC`,
+        WHERE room_code = $1 ORDER BY created_at ASC, receipt_id ASC`,
       [code],
     );
     return result.rows.map(row => value<RoomReceipt>(row.receipt_json));

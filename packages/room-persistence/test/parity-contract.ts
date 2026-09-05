@@ -78,9 +78,15 @@ export async function proveAtomicRoomReceiptParity(
   expect(await store.listReceipts(initial.code)).toEqual([joined]);
 
   expect(await store.compareAndSwapRoomAndDeleteReceipt(
+    initial.code, version2.version + 1, version3, joined.id,
+  )).toBe(false);
+  expect(await store.getRoom(initial.code)).toEqual(version2);
+  expect(await store.listReceipts(initial.code)).toEqual([joined]);
+  expect(await store.compareAndSwapRoomAndDeleteReceipt(
     initial.code, version2.version, version3, 'missing-roster',
   )).toBe(false);
   expect(await store.getRoom(initial.code)).toEqual(version2);
+  expect(await store.listReceipts(initial.code)).toEqual([joined]);
   expect(await store.compareAndSwapRoomAndDeleteReceipt(
     initial.code, version2.version, version3, joined.id,
   )).toBe(true);
@@ -90,10 +96,15 @@ export async function proveAtomicRoomReceiptParity(
   expect(await store.appendReceipt(legacy)).toBe(true);
   expect(await store.appendReceipt(unrelated)).toBe(true);
   expect(await store.compareAndSwapRoomAndReceipts(
+    initial.code, version3.version + 1, version4, [legacy.id], [replacement],
+  )).toBe(false);
+  expect(await store.getRoom(initial.code)).toEqual(version3);
+  expect(await store.listReceipts(initial.code)).toEqual([legacy, unrelated]);
+  expect(await store.compareAndSwapRoomAndReceipts(
     initial.code, version3.version, version4, [legacy.id], [replacement],
   )).toBe(true);
   expect(await store.getRoom(initial.code)).toEqual(version4);
-  expect(await store.listReceipts(initial.code)).toEqual([unrelated, replacement]);
+  expect(await store.listReceipts(initial.code)).toEqual([replacement, unrelated]);
   expect(await store.deleteReceipt(initial.code, unrelated.id)).toBe(true);
   expect(await store.deleteReceipt(initial.code, unrelated.id)).toBe(false);
   expect(await store.listReceipts(initial.code)).toEqual([replacement]);
