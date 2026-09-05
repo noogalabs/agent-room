@@ -16,7 +16,9 @@ if [ -n "${AGENT_ROOM_TRUST_STORE_JSON:-}" ] && [ -n "${AGENT_ROOM_TRUST_STORE:-
 fi
 
 if [ -n "${AGENT_ROOM_TRUST_STORE_B64:-}" ] || [ -n "${AGENT_ROOM_TRUST_STORE_JSON:-}" ]; then
-  AGENT_ROOM_TRUST_STORE="${TMPDIR:-/tmp}/agent-room-trust-store.json"
+  trust_store_runtime_dir="$(mktemp -d "${TMPDIR:-/tmp}/agent-room-trust-store.XXXXXX")"
+  chmod 700 "$trust_store_runtime_dir"
+  AGENT_ROOM_TRUST_STORE="$trust_store_runtime_dir/trust-store.json"
   if [ -n "${AGENT_ROOM_TRUST_STORE_B64:-}" ]; then
     printf '%s' "$AGENT_ROOM_TRUST_STORE_B64" | base64 -d > "$AGENT_ROOM_TRUST_STORE"
   else

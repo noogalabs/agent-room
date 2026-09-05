@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import pg from 'pg';
@@ -25,6 +25,15 @@ async function reset() {
   for (const { tablename } of tables.rows) {
     await pool.query(`DROP TABLE IF EXISTS ${JSON.stringify(tablename)} CASCADE`);
   }
+}
+
+async function materializedTrustStore(runtime) {
+  const entries = await readdir(runtime, { withFileTypes: true });
+  const seedDirectory = entries.find(entry => entry.isDirectory() && entry.name.startsWith('agent-room-trust-store.'));
+  if (!seedDirectory) throw new Error('materialized trust seed private directory was not created');
+  const directory = resolve(runtime, seedDirectory.name);
+  if ((await stat(directory)).mode & 0o077) throw new Error('materialized trust seed directory was not mode 0700');
+  return resolve(directory, 'trust-store.json');
 }
 
 async function runColdBoot(label, arrange, expectedTrustKeyCount, seedEnv = {}, verify = async () => {}) {
@@ -72,7 +81,7 @@ async function runColdBoot(label, arrange, expectedTrustKeyCount, seedEnv = {}, 
       throw new Error(`${label} omitted the loud zero-trust startup log`);
     }
     if (seedEnv.AGENT_ROOM_TRUST_STORE_B64 || seedEnv.AGENT_ROOM_TRUST_STORE_JSON) {
-      const materialized = resolve(runtime, 'agent-room-trust-store.json');
+      const materialized = await materializedTrustStore(runtime);
       if ((await stat(materialized)).mode & 0o077) {
         throw new Error(`${label} materialized trust seed with group/other permissions`);
       }
@@ -131,14 +140,17 @@ async function rejectMalformedSeed() {
   child.stdout.on('data', chunk => { output += chunk; });
   child.stderr.on('data', chunk => { output += chunk; });
   const code = await new Promise((resolveExit, rejectExit) => {
-    const timer = setTimeout(() => rejectExit(new Error('malformed seed did not fail promptly')), 10000);
+    const timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      rejectExit(new Error('malformed seed did not fail promptly'));
+    }, 10000);
     child.once('exit', value => { clearTimeout(timer); resolveExit(value); });
   });
   try {
     if (code === 0 || !output.includes('trust_store_invalid')) {
       throw new Error(`malformed supplied seed did not fail loudly:\n${output}`);
     }
-    const materialized = resolve(runtime, 'agent-room-trust-store.json');
+    const materialized = await materializedTrustStore(runtime);
     if ((await stat(materialized)).mode & 0o077) {
       throw new Error('malformed supplied seed was not materialized with mode 0600');
     }
