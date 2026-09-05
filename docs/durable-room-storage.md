@@ -82,8 +82,12 @@ application does not auto-mutate production schema at request time.
 ## Migration and backfill
 
 1. Deploy the seam with `redis` as the default; behavior and TTL stay unchanged.
-2. Provision Postgres and explicitly run the reviewed schema migration with
-   `AGENT_ROOM_DATABASE_URL=postgresql://... npm run migrate:postgres -w packages/room-persistence`; application startup
+2. Provision Postgres. The production Docker/Railway start path runs the
+   reviewed, idempotent migration before starting the server; a failed
+   migration stops the process, so an older schema never reaches request
+   handling. Operators running outside that packaged path can apply the same
+   migration explicitly with `AGENT_ROOM_DATABASE_URL=postgresql://... npm run
+   migrate:postgres -w packages/room-persistence`. Application startup still
    verifies the schema version and fails closed without mutating it.
    `AGENT_ROOM_ALLOW_REMOTE_DB` is a process-environment break-glass hatch and
    must never be stored in organization secrets.
@@ -95,6 +99,12 @@ application does not auto-mutate production schema at request time.
    shadow data to callers.
 6. Change the flag only after governance and hosting approval. Keep Redis for
    presence, rate limits, and turn coordination.
+
+The public image copies `trust-store.example.json` as a zero-key, zero-trust
+first-boot seed and logs that state loudly. A deployment that trusts fleets must
+replace `/app/trust-store.json` with its own public-key-only seed at deploy time;
+organization trust anchors do not belong in this public repository. A missing
+or malformed configured seed still fails startup.
 
 Rollback changes the selection flag back to Redis. It does not delete Postgres
 records. There is no automatic dual-write in this slice because an uncoordinated

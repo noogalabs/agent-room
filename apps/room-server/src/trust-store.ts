@@ -44,6 +44,10 @@ export async function loadStoredTrustStore(path: string | undefined): Promise<St
   let parsed: unknown;
   try { parsed = JSON.parse(await readFile(path, 'utf8')); }
   catch { throw new TrustStoreError('trust_store_invalid', 'Trust store is unreadable or malformed.'); }
+  // The public image deliberately starts with no trusted fleets. Operators
+  // supply their own public anchors at deploy time; an empty array is a safe,
+  // zero-trust community default rather than a reason to crash-loop.
+  if (Array.isArray(parsed) && parsed.length === 0) return [];
   return validateStoredTrustKeys(parsed);
 }
 

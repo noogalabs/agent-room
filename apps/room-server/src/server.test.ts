@@ -10,6 +10,7 @@ import { Pool } from 'pg';
 import { RoomRecordServer, signAgentCard } from '@agent-room/room-persistence';
 import type { Room } from '@agent-room/shared';
 import { createHostedRoomServer, startHostedRoomServer } from './server.js';
+import { loadStoredTrustStore } from './trust-store.js';
 import { HumanSessionAuthority } from './human-sessions.js';
 
 const opened: Array<Awaited<ReturnType<typeof createHostedRoomServer>>> = [];
@@ -140,7 +141,7 @@ describe('hosted room production entry', () => {
     await writeFile(bad, '{');
     await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_invalid' });
     await writeFile(bad, '[]');
-    await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_empty' });
+    await expect(loadStoredTrustStore(bad)).resolves.toEqual([]);
     const keys = generateKeyPairSync('ed25519');
     await writeFile(bad, JSON.stringify([{ fleetId: '', keyId: 'k', publicKey: keys.publicKey.export({ format: 'jwk' }) }]));
     await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: bad })).rejects.toMatchObject({ name: 'trust_store_entry_invalid' });
@@ -940,7 +941,10 @@ describe('hosted room production entry', () => {
     const roomScreen = await readFile(new URL('apps/web/src/screens/Room.tsx', root), 'utf8');
     const roomHook = await readFile(new URL('apps/web/src/hooks/useRoom.ts', root), 'utf8');
     const webClient = await readFile(new URL('apps/web/src/room-server-client.ts', root), 'utf8');
-    expect(docker).toContain('CMD ["node", "apps/room-server/dist/index.js"]');
+    expect(docker).toContain('COPY trust-store.example.json /app/trust-store.json');
+    expect(docker).toContain('ENV AGENT_ROOM_TRUST_STORE=/app/trust-store.json');
+    expect(docker).toContain('COPY scripts/start-room-server.sh /app/scripts/start-room-server.sh');
+    expect(docker).toContain('CMD ["sh", "scripts/start-room-server.sh"]');
     expect(docker).toContain('COPY apps/web ./apps/web');
     expect(docker).toContain('-w apps/web');
     expect(docker).not.toContain('apps/hosted-agent/dist/index.js');
@@ -955,7 +959,10 @@ describe('hosted room production entry', () => {
     ]) {
       expect(dockerIgnore.split(/\r?\n/)).toContain(pattern);
     }
-    expect(railway).toContain('apps/room-server/dist/index.js');
+    expect(railway).toContain('sh scripts/start-room-server.sh');
+    const productionStart = await readFile(new URL('scripts/start-room-server.sh', root), 'utf8');
+    expect(productionStart).toContain('node packages/room-persistence/dist/migrate.js --allow-remote');
+    expect(productionStart).toContain('exec node apps/room-server/dist/index.js');
     expect(pkg.dependencies['@agent-room/room-persistence']).toBe('*');
     expect(entry).toContain('RoomRecordServer.fromEnvironment');
     expect(entry).toContain("env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist'");
