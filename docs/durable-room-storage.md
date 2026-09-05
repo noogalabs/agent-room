@@ -100,11 +100,14 @@ application does not auto-mutate production schema at request time.
 6. Change the flag only after governance and hosting approval. Keep Redis for
    presence, rate limits, and turn coordination.
 
-The public image copies `trust-store.example.json` as a zero-key, zero-trust
-first-boot seed and logs that state loudly. A deployment that trusts fleets must
-replace `/app/trust-store.json` with its own public-key-only seed at deploy time;
-organization trust anchors do not belong in this public repository. A missing
-or malformed configured seed still fails startup.
+The public image starts healthy with zero trusted fleets and logs that state
+loudly when no seed is configured. A deployment that trusts fleets supplies its
+public-key-only seed through `AGENT_ROOM_TRUST_STORE_B64`,
+`AGENT_ROOM_TRUST_STORE_JSON`, or an explicit `AGENT_ROOM_TRUST_STORE` file;
+the production entrypoint materializes environment seed data with mode `0600`.
+`trust-store.example.json` documents the zero-trust shape but is not copied into
+the image. Organization trust anchors do not belong in this public repository.
+A missing explicit file or malformed supplied seed still fails startup.
 
 Rollback changes the selection flag back to Redis. It does not delete Postgres
 records. There is no automatic dual-write in this slice because an uncoordinated

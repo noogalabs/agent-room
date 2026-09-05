@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import pg from 'pg';
 
@@ -24,9 +25,10 @@ async function reset() {
   }
 }
 
-async function runColdBoot(label, arrange) {
+async function runColdBoot(label, arrange, seedEnv = {}) {
   await reset();
   await arrange();
+  const runtime = await mkdtemp(resolve(tmpdir(), 'agent-room-cold-boot-'));
   const port = String(41000 + Math.floor(Math.random() * 1000));
   const child = spawn('sh', ['scripts/start-room-server.sh'], {
     cwd: root,
@@ -36,12 +38,13 @@ async function runColdBoot(label, arrange) {
       ...process.env,
       AGENT_ROOM_PERSISTENCE: 'postgres',
       AGENT_ROOM_DATABASE_URL: databaseUrl,
-      AGENT_ROOM_TRUST_STORE: resolve(root, 'trust-store.example.json'),
       AGENT_ROOM_HUMAN_SESSION_SECRET: 'cold-boot-human-session-secret-000000000000',
       AGENT_ROOM_HOST_TOKEN: 'cold-boot-host-token-0000000000000000000000',
       AGENT_ROOM_ADMIN_TOKEN: 'cold-boot-admin-token-00000000000000000000',
       AGENT_ROOM_MEMBER_AUTH: 'required',
       PORT: port,
+      TMPDIR: runtime,
+      ...seedEnv,
     },
   });
   let output = '';
@@ -66,17 +69,66 @@ async function runColdBoot(label, arrange) {
     if (!output.includes('agent_room_trust_store_empty')) {
       throw new Error(`${label} omitted the loud zero-trust startup log`);
     }
+    if (seedEnv.AGENT_ROOM_TRUST_STORE_B64 || seedEnv.AGENT_ROOM_TRUST_STORE_JSON) {
+      const materialized = resolve(runtime, 'agent-room-trust-store.json');
+      if ((await stat(materialized)).mode & 0o077) {
+        throw new Error(`${label} materialized trust seed with group/other permissions`);
+      }
+    }
     process.stdout.write(`${label}: healthy at schema v2 with zero trusted fleets\n`);
   } finally {
     if (child.pid) {
       try { process.kill(-child.pid, 'SIGTERM'); } catch {}
     }
+    await rm(runtime, { recursive: true, force: true });
+  }
+}
+
+async function rejectMalformedSeed() {
+  await reset();
+  const runtime = await mkdtemp(resolve(tmpdir(), 'agent-room-bad-seed-'));
+  const child = spawn('sh', ['scripts/start-room-server.sh'], {
+    cwd: root,
+    env: {
+      ...process.env,
+      AGENT_ROOM_PERSISTENCE: 'postgres',
+      AGENT_ROOM_DATABASE_URL: databaseUrl,
+      AGENT_ROOM_TRUST_STORE_JSON: '{',
+      AGENT_ROOM_HUMAN_SESSION_SECRET: 'cold-boot-human-session-secret-000000000000',
+      AGENT_ROOM_HOST_TOKEN: 'cold-boot-host-token-0000000000000000000000',
+      AGENT_ROOM_ADMIN_TOKEN: 'cold-boot-admin-token-00000000000000000000',
+      AGENT_ROOM_MEMBER_AUTH: 'required',
+      PORT: '41999',
+      TMPDIR: runtime,
+    },
+  });
+  let output = '';
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { output += chunk; });
+  const code = await new Promise((resolveExit, rejectExit) => {
+    const timer = setTimeout(() => rejectExit(new Error('malformed seed did not fail promptly')), 10000);
+    child.once('exit', value => { clearTimeout(timer); resolveExit(value); });
+  });
+  try {
+    if (code === 0 || !output.includes('trust_store_invalid')) {
+      throw new Error(`malformed supplied seed did not fail loudly:\n${output}`);
+    }
+    const materialized = resolve(runtime, 'agent-room-trust-store.json');
+    if ((await stat(materialized)).mode & 0o077) {
+      throw new Error('malformed supplied seed was not materialized with mode 0600');
+    }
+    process.stdout.write('malformed supplied seed: refused loudly before listen\n');
+  } finally {
+    await rm(runtime, { recursive: true, force: true });
   }
 }
 
 try {
   await runColdBoot('empty database', async () => {});
-  await runColdBoot('previous schema', async () => { await pool.query(v1); });
+  await runColdBoot('previous schema', async () => { await pool.query(v1); }, {
+    AGENT_ROOM_TRUST_STORE_B64: Buffer.from('[]').toString('base64'),
+  });
+  await rejectMalformedSeed();
 } finally {
   await reset();
   await pool.end();

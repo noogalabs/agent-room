@@ -40,7 +40,7 @@ export function hydrateTrustKeys(stored: readonly StoredFleetTrustKey[]): FleetT
 }
 
 export async function loadStoredTrustStore(path: string | undefined): Promise<StoredFleetTrustKey[]> {
-  if (!path?.trim()) throw new TrustStoreError('trust_store_required', 'AGENT_ROOM_TRUST_STORE is required.');
+  if (!path?.trim()) return [];
   let parsed: unknown;
   try { parsed = JSON.parse(await readFile(path, 'utf8')); }
   catch { throw new TrustStoreError('trust_store_invalid', 'Trust store is unreadable or malformed.'); }

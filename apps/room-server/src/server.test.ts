@@ -135,7 +135,7 @@ describe('hosted room production entry', () => {
   it('refuses every invalid first-boot trust store before listen', async () => {
     const memory = memoryRecords(); const fromEnvironment = vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const listen = vi.spyOn(HttpServer.prototype, 'listen');
-    await expect(startHostedRoomServer({})).rejects.toMatchObject({ name: 'trust_store_required' });
+    await expect(loadStoredTrustStore(undefined)).resolves.toEqual([]);
     const dir = await mkdtemp(join(tmpdir(), 'bad-trust-')); const bad = join(dir, 'bad.json');
     await expect(startHostedRoomServer({ AGENT_ROOM_TRUST_STORE: join(dir, 'missing.json') })).rejects.toMatchObject({ name: 'trust_store_invalid' });
     await writeFile(bad, '{');
@@ -941,8 +941,8 @@ describe('hosted room production entry', () => {
     const roomScreen = await readFile(new URL('apps/web/src/screens/Room.tsx', root), 'utf8');
     const roomHook = await readFile(new URL('apps/web/src/hooks/useRoom.ts', root), 'utf8');
     const webClient = await readFile(new URL('apps/web/src/room-server-client.ts', root), 'utf8');
-    expect(docker).toContain('COPY trust-store.example.json /app/trust-store.json');
-    expect(docker).toContain('ENV AGENT_ROOM_TRUST_STORE=/app/trust-store.json');
+    expect(docker).not.toContain('COPY trust-store.example.json /app/trust-store.json');
+    expect(docker).not.toContain('ENV AGENT_ROOM_TRUST_STORE=/app/trust-store.json');
     expect(docker).toContain('COPY scripts/start-room-server.sh /app/scripts/start-room-server.sh');
     expect(docker).toContain('CMD ["sh", "scripts/start-room-server.sh"]');
     expect(docker).toContain('COPY apps/web ./apps/web');
@@ -963,6 +963,9 @@ describe('hosted room production entry', () => {
     const productionStart = await readFile(new URL('scripts/start-room-server.sh', root), 'utf8');
     expect(productionStart).toContain('node packages/room-persistence/dist/migrate.js --allow-remote');
     expect(productionStart).toContain('exec node apps/room-server/dist/index.js');
+    expect(productionStart).toContain('AGENT_ROOM_TRUST_STORE_B64');
+    expect(productionStart).toContain('AGENT_ROOM_TRUST_STORE_JSON');
+    expect(productionStart).toContain('chmod 600');
     expect(pkg.dependencies['@agent-room/room-persistence']).toBe('*');
     expect(entry).toContain('RoomRecordServer.fromEnvironment');
     expect(entry).toContain("env.AGENT_ROOM_WEB_ROOT ?? 'apps/web/dist'");
