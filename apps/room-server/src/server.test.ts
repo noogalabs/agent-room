@@ -1184,7 +1184,9 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
     });
     const restore = await rejectReceiptAppendFor(code);
     try {
-      expect((await create()).status).toBe(400);
+      const failed = await create();
+      expect(await failed.json()).toStrictEqual({ error: 'room_version_conflict' });
+      expect(failed.status).toBe(400);
       expect(await hosted.rooms.getRoom(code)).toBeNull();
       expect(await hosted.rooms.listReceipts(code)).toStrictEqual([]);
     } finally { await restore(); }

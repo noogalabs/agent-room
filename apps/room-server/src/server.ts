@@ -216,9 +216,13 @@ export async function createHostedRoomServer(
         await createRoomExclusive(room);
         let joined: Awaited<ReturnType<typeof addHuman>>;
         let persistedRoom: Room | null = null;
+        let joinAttempted = false;
+        let joinCommitted = false;
         try {
+          joinAttempted = true;
           const invite = await humans.issueInvite(room.code);
           joined = await addHuman(room.code, { ...input, inviteToken: invite.token, name: input.name, creator: true });
+          joinCommitted = true;
           persistedRoom = await rooms.getRoom(room.code);
           if (!persistedRoom) throw new HumanSessionError('room_not_found');
         } catch (caught) {
@@ -232,6 +236,9 @@ export async function createHostedRoomServer(
           if (current && !await rooms.deleteRoomIfVersion(room.code, current.version)) {
             console.error('browser_room_rollback_failed', { roomCode: room.code, expectedVersion: current.version });
             throw new HumanSessionError('browser_room_rollback_failed');
+          }
+          if (joinAttempted && !joinCommitted && !(caught instanceof HumanSessionError)) {
+            throw new HumanSessionError('room_version_conflict');
           }
           throw caught;
         }
