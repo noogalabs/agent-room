@@ -108,10 +108,11 @@ the production entrypoint materializes environment seed data with mode `0600`.
 `trust-store.example.json` documents the zero-trust shape but is not copied into
 the image. Organization trust anchors do not belong in this public repository.
 A missing explicit file or malformed supplied seed still fails startup.
-The malformed-Base64 cold-boot casualty targets the GNU `base64` decoder used
-by the Linux production image and CI. BSD `base64` on macOS is less strict for
-some invalid inputs, so a laptop may reach JSON validation instead of failing
-at the decode step; production-path proof comes from the Linux CI run.
+The malformed-Base64 cold-boot casualty deliberately uses characters outside
+the Base64 alphabet and accepts the failure diagnostics emitted by both GNU
+and BSD `base64`. Keep the fixture outside that alphabet: BSD `base64` is less
+strict for some alphabet-only malformed strings and may reach JSON validation
+instead of failing at the decode step.
 
 Rollback changes the selection flag back to Redis. It does not delete Postgres
 records. There is no automatic dual-write in this slice because an uncoordinated
