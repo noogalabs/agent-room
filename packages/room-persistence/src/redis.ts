@@ -14,7 +14,7 @@ const receiptsKey = (code: string): string => `room-receipts:${code}`;
 const fleetTrustIdsKey = 'agent-room:fleet-trust-ids';
 const fleetTrustKey = (id: string): string => `agent-room:fleet-trust:${id}`;
 
-const ROOM_CAS_SCRIPT = [
+export const ROOM_CAS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   'if not raw then return 0 end',
   'local current = cjson.decode(raw)',
@@ -23,7 +23,7 @@ const ROOM_CAS_SCRIPT = [
   'return 1',
 ].join('\n');
 
-const ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT = [
+export const ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   'if not raw then return 0 end',
   'local current = cjson.decode(raw)',
@@ -41,7 +41,7 @@ const ROOM_CAS_AND_RECEIPT_DELETE_SCRIPT = [
   'return 1',
 ].join('\n');
 
-const ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT = [
+export const ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   'if not raw then return 0 end',
   'local current = cjson.decode(raw)',
@@ -66,7 +66,7 @@ const ROOM_CAS_AND_RECEIPT_REPLACE_SCRIPT = [
   'return 1',
 ].join('\n');
 
-const ROOM_CAS_AND_RECEIPTS_SCRIPT = [
+export const ROOM_CAS_AND_RECEIPTS_SCRIPT = [
   "local raw = redis.call('GET', KEYS[1])",
   'if not raw then return 0 end',
   'local current = cjson.decode(raw)',
