@@ -189,6 +189,14 @@ describe('hosted room production entry', () => {
     expect(forgedEcho.status).toBe(400);
     expect(await forgedEcho.json()).toStrictEqual({ error: 'member_identity_mismatch' });
     expect(memory.records.appendMessage).toHaveBeenCalledTimes(beforeForgedEcho);
+    const forgedClient = await fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'send', code: 'ROOM1', message: { ...agentMessage, client: 'codex' } }) });
+    expect(forgedClient.status).toBe(400);
+    expect(await forgedClient.json()).toStrictEqual({ error: 'member_identity_mismatch' });
+    expect(memory.records.appendMessage).toHaveBeenCalledTimes(beforeForgedEcho);
+    const forgedType = await fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'send', code: 'ROOM1', message: { ...agentMessage, type: 'status' } }) });
+    expect(forgedType.status).toBe(400);
+    expect(await forgedType.json()).toStrictEqual({ error: 'member_identity_mismatch' });
+    expect(memory.records.appendMessage).toHaveBeenCalledTimes(beforeForgedEcho);
     const agentSend = await fetch(`${base}/api/room`, { method: 'POST', headers: { authorization: `Bearer ${joined.participantToken}`, 'content-type': 'application/json' }, body: JSON.stringify({ action: 'send', code: 'ROOM1', message: agentMessage }) });
     expect(agentSend.status).toBe(200);
     expect(memory.records.appendMessage).toHaveBeenLastCalledWith('ROOM1', expect.objectContaining({ name: 'Agent A', client: 'cc', role: '', initials: 'AA', color: '#000000' }));
