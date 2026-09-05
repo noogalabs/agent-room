@@ -615,7 +615,7 @@ describe('hosted room production entry', () => {
     expect(logged).toHaveBeenCalledWith('browser_room_rollback_failed', expect.objectContaining({ roomCode: 'LOUDRB', expectedVersion: 1 }));
   });
 
-  it('rolls back the committed creator join at its current version when the response re-read fails', async () => {
+  it('builds the response from the committed creator join without a fallible post-commit re-read', async () => {
     const trust = await trustFile(); const memory = memoryRecords();
     vi.spyOn(RoomRecordServer, 'fromEnvironment').mockResolvedValue(memory.records);
     const base = await listenHosted(await createHostedRoomServer(hostedEnv(trust.path)));
@@ -629,13 +629,13 @@ describe('hosted room production entry', () => {
     });
 
     memory.failCommittedRoomRead();
-    expect((await create()).status).toBe(500);
-    expect(await memory.records.getRoom('POSTJOIN')).toBeNull();
-    expect(memory.receipts()).toStrictEqual([]);
-
-    const retried = await create();
-    expect(retried.status).toBe(201);
-    expect((await retried.json() as { participant: Room['participants'][number] }).participant.name).toBe('Same Host');
+    const created = await create();
+    expect(created.status).toBe(201);
+    expect((await created.json() as { participant: Room['participants'][number] }).participant.name).toBe('Same Host');
+    expect(memory.current()).toMatchObject({ code: 'POSTJOIN', version: 2,
+      participants: [expect.objectContaining({ name: 'Same Host' })] });
+    expect(memory.receipts()).toHaveLength(3);
+    expect(memory.records.getRoom).toHaveBeenCalledTimes(2);
   });
 
   it('keeps a room-lifetime human invite reusable, revokes only future joins, refreshes presence, and frees a seat on leave', async () => {
@@ -1191,7 +1191,12 @@ describe.skipIf(!postgresUrl)('hosted room production entry with Postgres', () =
         SET version = version + 1,
             room_json = jsonb_set(room_json, '{version}', to_jsonb(version + 1))
         WHERE code = $1`, [roomCode]);
-      return update(roomCode, expectedVersion, next, deleteIds, appends);
+      const result = await update(roomCode, expectedVersion, next, deleteIds, appends);
+      await admin.query(`UPDATE agent_room_rooms
+        SET version = version - 1,
+            room_json = jsonb_set(room_json, '{version}', to_jsonb(version - 1))
+        WHERE code = $1`, [roomCode]);
+      return result;
     });
     try {
       const failed = await create();
