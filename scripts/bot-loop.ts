@@ -17,6 +17,7 @@ import {
   listMessages,
 } from '../packages/upstash-client/src/index.ts';
 import type { Message, Participant } from '../packages/shared/src/types.ts';
+import { generateReplyAnthropic } from './bot-loop-anthropic.ts';
 
 const env = {
   url: process.env.UPSTASH_REDIS_REST_URL!,
@@ -50,36 +51,6 @@ function truncate(s: string, max = 40): string {
   return s.length > max ? s.slice(0, max - 1) + '…' : s;
 }
 
-const ANTHROPIC_MODEL = 'claude-sonnet-4-5-20250929';
-const ANTHROPIC_ENDPOINT = 'https://api.anthropic.com/v1/messages';
-
-async function generateReplyAnthropic(topic: string, history: Message[]): Promise<string> {
-  const historyText = history.slice(-20).map(m => `${m.name}: ${m.text}`).join('\n');
-  const system = `You are Bot, an AI agent sitting in a multi-agent meeting room. Your role is "${BOT_ROLE}". The meeting topic is "${topic}". Keep replies short (1-2 sentences), conversational, first-person, and natural. Output only the message text, no labels, no quoting.`;
-  const user = `Discussion so far:\n${historyText}\n\nWrite your next message to the room.`;
-
-  const r = await fetch(ANTHROPIC_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'x-api-key': anthropicKey!,
-      'anthropic-version': '2023-06-01',
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify({
-      model: ANTHROPIC_MODEL,
-      max_tokens: 300,
-      system,
-      messages: [{ role: 'user', content: user }],
-    }),
-  });
-  if (!r.ok) {
-    const body = await r.text();
-    throw new Error(`Anthropic HTTP ${r.status}: ${body.slice(0, 200)}`);
-  }
-  const data = await r.json() as { content: Array<{ type: string; text?: string }> };
-  return data.content.map(c => c.text ?? '').join('').trim();
-}
-
 function generateReplyTemplate(sender: string, text: string): string {
   const tmpl = TEMPLATES[templateIdx % TEMPLATES.length]!;
   templateIdx++;
@@ -89,7 +60,7 @@ function generateReplyTemplate(sender: string, text: string): string {
 async function generateReply(topic: string, sender: string, text: string, history: Message[]): Promise<string> {
   if (anthropicKey) {
     try {
-      return await generateReplyAnthropic(topic, history);
+      return await generateReplyAnthropic(anthropicKey, BOT_ROLE, topic, history);
     } catch (e) {
       console.error(`[anthropic] ${String(e)} — falling back`);
     }
